@@ -24,7 +24,7 @@ uses {$ifdef darwin}macport,messages,lcltype,{$endif}
      {$ifdef windows}jwawindows, windows,commctrl,{$endif}
      sysutils, LCLIntf, forms, classes, controls, comctrls, stdctrls, extctrls, symbolhandler,
      cefuncproc, NewKernelHandler, graphics, disassemblerviewlinesunit, disassembler,
-     math, lmessages, menus, DissectCodeThread
+     math, lmessages, menus, DissectCodeThread, tcclib
 
      {$ifdef USELAZFREETYPE}
      ,cefreetype,FPCanvas, EasyLazFreeType, LazFreeTypeFontCollection, LazFreeTypeIntfDrawer,
@@ -92,6 +92,7 @@ type TDisassemblerview=class(TPanel)
     fOnDisassemblerViewOverride: TDisassemblerViewOverrideCallback;
 
 
+    fCR3: qword;
 
     procedure updateScrollbox;
     procedure scrollboxResize(Sender: TObject);
@@ -126,7 +127,7 @@ type TDisassemblerview=class(TPanel)
     procedure synchronizeDisassembler;
     procedure StatusInfoLabelCopy(sender: TObject);
 
-
+    procedure setCR3(pa: QWORD);
   protected
     procedure HandleSpecialKey(key: word);
     procedure WndProc(var msg: TMessage); override;
@@ -154,6 +155,8 @@ type TDisassemblerview=class(TPanel)
     drawer: TIntfFreeTypeDrawer;
     {$endif}
 
+    currentDisassembler: TDisassembler;
+
     procedure DoDisassemblerViewLineOverride(address: ptruint; var addressstring: string; var bytestring: string; var opcodestring: string; var parameterstring: string; var specialstring: string);
 
     procedure reinitialize; //deletes the assemblerlines
@@ -172,6 +175,7 @@ type TDisassemblerview=class(TPanel)
 
     function getDisassemblerLineAtPoint(p: tpoint): TDisassemblerLine;
     function getReferencedByLineAtPos(p: tpoint): ptruint;
+    function getSourceCodeAtPos(p: tpoint): PLineNumberInfo;
     function ClientToCanvas(p: tpoint): TPoint;
 
     constructor create(AOwner: TComponent); override;
@@ -192,6 +196,7 @@ type TDisassemblerview=class(TPanel)
     property Osb: TBitmap read offscreenbitmap;
     property OnExtraLineRender: TDisassemblerExtraLineRender read fOnExtraLineRender write fOnExtraLineRender;
     property OnDisassemblerViewOverride: TDisassemblerViewOverrideCallback read fOnDisassemblerViewOverride write fOnDisassemblerViewOverride;
+    property CR3: qword read fCR3 write setCR3;
 end;
 
 
@@ -664,6 +669,11 @@ begin
   visibleDisassembler.showmodules:=symhandler.showModules;
   visibleDisassembler.showsymbols:=symhandler.showsymbols;
   visibleDisassembler.showsections:=symhandler.showsections;
+
+  currentDisassembler.showmodules:=symhandler.showModules;
+  currentDisassembler.showsymbols:=symhandler.showsymbols;
+  currentDisassembler.showsections:=symhandler.showsections;
+  currentDisassembler.is64bitOverride:=visibleDisassembler.is64bitOverride;
 end;
 
 procedure TDisassemblerview.StatusInfoLabelCopy(sender: TObject);
@@ -688,6 +698,18 @@ begin
   d:=getDisassemblerLineAtPoint(p);
   if d<>nil then
     result:=d.getReferencedByAddress(cp.y-d.top);
+end;
+
+function TDisassemblerview.getSourceCodeAtPos(p: tpoint): PLineNumberInfo;
+var cp: tpoint;
+  d: TDisassemblerLine;
+  y: integer;
+begin
+  result:=nil;
+  cp:=ClientToCanvas(p);
+  d:=getDisassemblerLineAtPoint(p);
+  if d<>nil then
+    result:=d.getSourceCode(cp.y-d.top);
 end;
 
 function TDisassemblerview.getDisassemblerLineAtPoint(p: tpoint): TDisassemblerLine;
@@ -1135,6 +1157,30 @@ begin
 end;
 
 
+procedure TDisassemblerview.setCR3(pa: QWORD);
+begin
+  {$ifdef windows}
+  if pa=fcr3 then exit;
+
+  freeAndNil(currentDisassembler);
+  if pa<>0 then
+  begin
+    currentDisassembler:=TCR3Disassembler.Create;
+    TCR3Disassembler(currentDisassembler).CR3:=pa;
+    currentDisassembler.syntaxhighlighting:=true;
+  end
+  else
+  begin
+    currentDisassembler:=TDisassembler.Create;
+    currentDisassembler.syntaxhighlighting:=true;
+  end;
+
+  fCR3:=pa;
+  {$endif}
+
+  update;
+end;
+
 destructor TDisassemblerview.destroy;
 begin
   destroyed:=true;
@@ -1165,6 +1211,9 @@ begin
   if statusinfo<>nil then
     freeandnil(statusinfo);
 
+  if currentDisassembler<>nil then
+    freeandnil(currentDisassembler);
+
 
   inherited destroy;
 end;
@@ -1175,6 +1224,10 @@ var
   mi: TMenuItem;
 begin
   inherited create(AOwner);
+
+  currentDisassembler:=TDisassembler.Create;
+  currentDisassembler.syntaxhighlighting:=true;
+
 
   {$ifdef USELAZFREETYPE}
   if loadCEFreeTypeFonts then

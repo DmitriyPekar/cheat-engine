@@ -44,6 +44,8 @@ type
     function CustomDraw(const ARect: TRect; AStage: TCustomDrawStage): Boolean;  override;
     function CustomDrawItem(AItem: TListItem; AState: TCustomDrawState; AStage: TCustomDrawStage): Boolean; override;
     function CustomDrawSubItem(AItem: TListItem; ASubItem: Integer; AState: TCustomDrawState; AStage: TCustomDrawStage): Boolean; override;
+
+    procedure SetParent(NewParent: TWinControl); override;
   public
   published
     property ViewStyle: TViewStyle read getViewStyle write setViewStyle;
@@ -54,6 +56,23 @@ implementation
 
 uses betterControls;
 
+
+procedure TNewListView.SetParent(NewParent: TWinControl);
+var h: tHandle;
+begin
+  inherited SetParent(newparent);
+
+  if (parent<>nil) and (viewstyle=vsReport) and (not (csReadingState in ControlState)) then
+  begin
+    h:=ListView_GetHeader(handle);
+    if (h<>0) and (h<>INVALID_HANDLE_VALUE) then
+    begin
+      AllowDarkModeForWindow(h, 1);
+      SetWindowTheme(h, 'ItemsView',nil);
+    end;
+  end;
+
+end;
 
 procedure TNewListView.setViewStyle(style: TViewStyle);
 var
@@ -69,7 +88,7 @@ begin
   begin
     cs:=ControlState;
 
-    if (olds<>style) and (style=vsReport) and (not (csReadingState in cs)) then
+    if (parent<>nil) and (olds<>style) and (style=vsReport) and (not (csReadingState in cs)) then
     begin
       h:=ListView_GetHeader(handle);
       if (h<>0) and (h<>INVALID_HANDLE_VALUE) then
@@ -149,9 +168,10 @@ procedure TNewListView.pp(var msg: TMessage);
 var
   p1: LPNMHDR;
   p2: LPNMCUSTOMDRAW;
+  columnid: integer;
+  c: tcolor;
 begin
-  if ShouldAppsUseDarkMode then
-  begin
+
     p1:=LPNMHDR(msg.lparam);
     if p1^.code=UINT(NM_CUSTOMDRAW) then
     begin
@@ -162,12 +182,20 @@ begin
         CDDS_PREPAINT: msg.Result:=CDRF_NOTIFYITEMDRAW;
         CDDS_ITEMPREPAINT:
         begin
-          SetTextColor(p2^.hdc, clwhite); //fDefaultTextColor);
           msg.result:=CDRF_DODEFAULT;
+          columnid:=p2^.dwItemSpec;
+
+          if (columnid>=0) and (columnid<columncount) and (column[columnid].tag<>0) then
+            c:=column[columnid].tag
+          else
+            c:=clWindowtext;
+
+
+          SetTextColor(p2^.hdc, c);
         end;
       end;
     end;
-  end;
+
 end;
 
 

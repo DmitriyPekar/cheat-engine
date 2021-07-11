@@ -115,8 +115,9 @@ uses
   LuaHeaderSections, frmDebuggerAttachTimeoutUnit, cheatecoins,
   frmMicrotransactionsUnit, frmSyntaxHighlighterEditor, LuaCustomImageList,
   dotnethost, rttihelper, cefreetype, LuaDotNetPipe, LuaRemoteExecutor,
-  newRadioButton, newCheckbox, newbutton, autoassemblercode, CSharpCompiler,
-  newhintwindow, memrecDataStructures, LuaCECustomButton;
+  autoassemblercode, CSharpCompiler, newhintwindow, memrecDataStructures,
+  LuaCECustomButton, DBVMDebuggerInterface, frmCR3SwitcherUnit, tcclib,
+  sourcecodehandler, frmSourceDisplayUnit;
 
 {$R cheatengine.res}
 {$IFDEF windows}
@@ -282,7 +283,9 @@ begin
 
   Application.Initialize;
 
+  {$ifdef windows}
   registerDarkModeHintHandler;
+  {$endif}
 
 
   overridefont:=nil;

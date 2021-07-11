@@ -1408,6 +1408,8 @@ begin
   mscript.Gutter.LineNumberPart.MarkupInfo.Background:=clBtnFace;
   mscript.Gutter.SeparatorPart.MarkupInfo.Background:=clBtnFace;
 
+  mscript.LineHighlightColor.Background:=ColorToRGB(mscript.Color) xor $212121;
+
 
   fq:=mscript.Font.Quality;
   if not (fq in [fqCleartypeNatural, fqDefault]) then
@@ -1446,8 +1448,12 @@ begin
 
   MenuItem3.ShortCutKey2:=TextToShortCut('Meta+S');
 
+  MenuItem11.ShortCut:=TextToShortCut('Meta+N');
+  MenuItem2.ShortCut:=TextToShortCut('Meta+O');
+  MenuItem3.ShortCut:=TextToShortCut('Meta+S');
+  miSaveCurrentScriptAs.ShortCut:=TextToShortCut('Meta+Alt+S');
 
-  {$endif}
+   {$endif}
 end;
 
 procedure TfrmLuaEngine.FormDestroy(Sender: TObject);
@@ -1616,7 +1622,7 @@ begin
   if savedialog1.Execute then
   begin
     mscript.lines.SaveToFile(savedialog1.filename);
-    frmLuaEngine.Caption:=rsLuaEngine+' '+ExtractFileNameOnly(savedialog1.filename);
+    Caption:=rsLuaEngine+' '+ExtractFileNameOnly(savedialog1.filename);
   end;
 end;
 

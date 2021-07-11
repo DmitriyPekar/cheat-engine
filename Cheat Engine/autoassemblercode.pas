@@ -20,7 +20,7 @@ unit autoassemblercode;
 interface
 
 uses
-  Classes, SysUtils, SymbolListHandler;
+  Classes, SysUtils, SymbolListHandler,tcclib;
 
 type
   TAutoAssemblerCodePass2Data=record
@@ -48,6 +48,13 @@ type
       end;
 
       targetself: boolean;
+
+      symbolPrefix: string;
+      nodebug: boolean;
+      sourceCodeInfo: TSourceCodeInfo;
+{$ifdef windows}
+      kernelAlloc: boolean;
+{$endif}
     end;
   end;
 
@@ -60,13 +67,13 @@ procedure AutoAssemblerCodePass2(var dataForPass2: TAutoAssemblerCodePass2Data; 
 
 implementation
 
-uses windows,ProcessHandlerUnit, symbolhandler, luahandler, lua, lauxlib, lualib, StrUtils,
-  Clipbrd, dialogs, lua_server, tcclib, Assemblerunit, NewKernelHandler;
+uses {$ifdef windows}windows,{$endif}{$ifdef darwin}macport,macportdefines,math,{$endif}ProcessHandlerUnit, symbolhandler, luahandler, lua, lauxlib, lualib, StrUtils,
+  Clipbrd, dialogs, lua_server, Assemblerunit, NewKernelHandler, DBK32functions;
 
 
 type
   TAACodeType=(ctLua, ctC);
-  TLuaCodeParameter=record
+  TLuaCodeParameter=record   //also CCode parameters
     varname: string;
     contextitem: integer;
 
@@ -372,15 +379,12 @@ var
   _tcc: TTCC;
   s: string;
 
-  sl: TSymbolListHandler;
+  tempsymbollist: TStringlist;
 begin
   secondarylist:=TStringList.create;
   bytes:=tmemorystream.create;
 
-  if symbollist=nil then
-    sl:=TSymbolListHandler.create
-  else
-    sl:=symbollist;
+  tempsymbollist:=tstringlist.create;
 
   errorlog:=tstringlist.create;
 
@@ -409,35 +413,56 @@ begin
     for i:=0 to length(dataForPass2.cdata.references)-1 do
       secondarylist.AddObject(dataForPass2.cdata.references[i].name, tobject(dataForPass2.cdata.references[i].address));
 
-    if _tcc.compileScript(dataForPass2.cdata.cscript.Text, dataForPass2.cdata.address, bytes, symbollist, errorlog, secondarylist, dataForPass2.cdata.targetself ) then
+
+    if dataForPass2.cdata.nodebug=false then
+      dataForPass2.cdata.sourceCodeInfo:=TSourceCodeInfo.create;
+
+
+    if _tcc.compileScript(dataForPass2.cdata.cscript.Text, dataForPass2.cdata.address, bytes, tempsymbollist, dataForPass2.cdata.sourceCodeInfo, errorlog, secondarylist, dataForPass2.cdata.targetself ) then
     begin
       if bytes.Size>dataForPass2.cdata.bytesize then
       begin
         //this will be a slight memoryleak but whatever
         //allocate 4x the amount of memory needed
+{$ifdef windows}
+        if dataForPass2.cdata.kernelAlloc then
+          newAddress:=ptruint(KernelAlloc(4*bytes.size))
+        else
+{$endif}
+          newAddress:=ptruint(VirtualAllocEx(phandle,nil,4*bytes.size,mem_reserve or mem_commit, PAGE_EXECUTE_READWRITE));
 
-        newAddress:=ptruint(VirtualAllocEx(phandle,nil,4*bytes.size,mem_reserve or mem_commit, PAGE_EXECUTE_READWRITE));
         if newAddress<>0 then
         begin
           dataForPass2.cdata.address:=newAddress;
           dataForPass2.cdata.bytesize:=4*bytes.size;
 
           //try again
-          sl.clear;
+          tempsymbollist.clear;
           bytes.clear;
           secondarylist.Clear;
           errorlog.clear;
-          if _tcc.compileScript(dataForPass2.cdata.cscript.text, dataForPass2.cdata.address, bytes, symbollist, errorlog, secondarylist, dataForPass2.cdata.targetself )=false then
+          if _tcc.compileScript(dataForPass2.cdata.cscript.text, dataForPass2.cdata.address, bytes, tempsymbollist, dataForPass2.cdata.sourceCodeInfo, errorlog, secondarylist, dataForPass2.cdata.targetself )=false then
           begin
             //wtf? something really screwed up here
-            VirtualFreeEx(phandle, pointer(newAddress), 0,MEM_FREE);
+{$ifdef windows}
+            if dataForPass2.cdata.kernelAlloc then
+              KernelFree(newAddress)
+            else
+{$endif}
+              VirtualFreeEx(phandle, pointer(newAddress), 0,MEM_FREE);
             raise exception.create('3rd time failure of c-code');
           end;
 
 
           if bytes.Size>dataForPass2.cdata.bytesize then
           begin
-            VirtualFreeEx(phandle, pointer(newAddress), 0,MEM_FREE);
+{$ifdef windows}
+            if dataForPass2.cdata.kernelAlloc then
+              KernelFree(newAddress)
+            else
+{$endif}
+              VirtualFreeEx(phandle, pointer(newAddress), 0,MEM_FREE);
+
             raise exception.create('(Unexplained and unmitigated code growth)');
           end;
         end
@@ -454,36 +479,51 @@ begin
         j:=secondarylist.IndexOf(dataforpass2.cdata.linklist[i].name);
         if j=-1 then raise exception.create('Failure to link '+dataForPass2.cdata.linklist[i].fromname+' due to missing reference');
 
-        syminfo:=sl.FindSymbol(dataForPass2.cdata.linklist[i].fromname);
-        if syminfo=nil then exception.create('Failure to link '+dataForPass2.cdata.linklist[i].fromname+' due to it missing in the c-code');
+        k:=tempsymbollist.IndexOf(dataForPass2.cdata.linklist[i].fromname);
+        if k=-1 then exception.create('Failure to link '+dataForPass2.cdata.linklist[i].fromname+' due to it missing in the c-code');
 
-        a:=syminfo^.address;
+        a:=ptruint(tempsymbollist.Objects[k]);
         writeProcessMemory(phandle, pointer(dataForPass2.cdata.references[j].address),@a,psize,bw);
       end;
 
+
       for i:=0 to length(dataForPass2.cdata.symbols)-1 do
       begin
-        syminfo:=sl.FindSymbol(dataForPass2.cdata.symbols[i].name);
-        if syminfo<>nil then
-          dataforpass2.cdata.symbols[i].address:=syminfo^.address;
+        j:=tempsymbollist.IndexOf(dataForPass2.cdata.symbols[i].name);
+        if j<>-1 then
+          dataforpass2.cdata.symbols[i].address:=ptruint(tempsymbollist.Objects[j])
+        else
+        begin
+          //not found. prefixed ?
+          if dataForPass2.cdata.symbolPrefix<>'' then
+          begin
+            s:=dataForPass2.cdata.symbols[i].name;
+            if s.StartsWith(dataForPass2.cdata.symbolPrefix+'.') then
+            begin
+              s:=copy(s,length(dataForPass2.cdata.symbolPrefix)+2);
+              j:=tempsymbollist.IndexOf(s);
+              if j<>-1 then
+                dataforpass2.cdata.symbols[i].address:=ptruint(tempsymbollist.Objects[j])
+            end;
+          end;
+        end;
       end;
-
-
 
 
       if symbollist<>nil then //caller wants the list
       begin
-        //strip the ceinternal_autofree_cfunction and other non-useful symbols from the symbollist
-        syminfo:=symbollist.FindFirstSymbolFromBase(0);
-        while syminfo<>nil do
+        for i:=0 to tempsymbollist.count-1 do
         begin
-          nextsyminfo:=syminfo^.next;
-          s:=syminfo^.originalstring;
+          s:=tempsymbollist[i];
+          if s.StartsWith('ceinternal_autofree_cfunction') then continue; //strip the ceinternal_autofree_cfunction
 
-          if s.StartsWith('ceinternal_autofree_cfunction') then
-            symbollist.DeleteSymbol(syminfo^.address);
-
-          syminfo:=nextsyminfo;
+          if dataForPass2.cdata.symbolPrefix<>'' then
+          begin
+            symbollist.AddSymbol('',dataForPass2.cdata.symbolPrefix+'.'+tempsymbollist[i], ptruint(tempsymbollist.Objects[i]), 1);
+            symbollist.AddSymbol('',tempsymbollist[i], ptruint(tempsymbollist.Objects[i]), 1,true);
+          end
+          else
+            symbollist.AddSymbol('',tempsymbollist[i], ptruint(tempsymbollist.Objects[i]), 1);
         end;
       end;
     end
@@ -496,23 +536,56 @@ begin
   finally
     freeandnil(errorlog);
 
-    if symbollist=nil then
-      freeandnil(sl);
-
     freeandnil(bytes);
     freeandnil(secondarylist);
 
     freeandnil(dataForPass2.cdata.cscript);
+
+    freeandnil(tempsymbollist);
   end;
+end;
+
+
+procedure ParseCBlockSpecificParameters(s: string; var dataForPass2: TAutoAssemblerCodePass2Data);
+var
+  i,j: integer;
+  params: array of string;
+  us: string;
+
+begin
+  params:=s.Split([' ',',']);
+  for i:=0 to length(params)-1 do
+  begin
+    us:=uppercase(params[i]);
+{$ifdef windows}
+    if (us='KALLOC') or (us='KERNELMODE') or (us='KERNEL') then
+      DataForPass2.cdata.kernelAlloc:=true;
+{$endif}
+
+    if (us='NODEBUG') then
+      DataForPass2.cdata.nodebug:=true;
+
+    if copy(us,1,7)='PREFIX=' then
+      DataForPass2.cdata.symbolPrefix:=copy(params[i],8);
+  end;
+
 end;
 
 procedure AutoAssemblerCBlockPass1(Script: TStrings; var i: integer; var dataForPass2: TAutoAssemblerCodePass2Data);
 //just copy the lines from script to cscript
+var
+  s: string;
 begin
   if dataForPass2.cdata.cscript=nil then
     dataForPass2.cdata.cscript:=tstringlist.create;
 
   dataForPass2.cdata.cscript.add('//{$C} block at line '+ptruint(script.Objects[i]).ToString);;
+
+  s:=trim(script[i]);
+  s:=copy(s,5,length(s)-5);
+  ParseCBlockSpecificParameters(s, dataForPass2);
+
+
   script.delete(i); //remove the {$C} line
   while i<script.Count-1 do
   begin
@@ -532,6 +605,7 @@ end;
 procedure AutoAssemblerCCodePass1(script: TStrings; parameters: TLuaCodeParams; var i: integer; var dataForPass2: TAutoAssemblerCodePass2Data; syntaxcheckonly: boolean; targetself: boolean);
 var
   j,k: integer;
+  tst: ptruint;
   s: string;
   endpos, scriptstart, scriptend: integer;
   scriptstartlinenr: integer;
@@ -551,6 +625,9 @@ var
 
   _tcc: TTCC;
 begin
+  s:=trim(script[i]);
+  s:=copy(s,9,length(s)-9);
+  ParseCBlockSpecificParameters(s, dataForPass2);
 
   if dataForPass2.cdata.cscript=nil then
     dataForPass2.cdata.cscript:=tstringlist.create;
@@ -580,6 +657,7 @@ begin
   functionname:='ceinternal_autofree_cfunction_at_line'+inttostr(ptruint(script.objects[scriptstart]));
   cscript.add('void '+functionname+'(void *parameters)');
   cscript.add('{');
+  cscript.add('  //get the values from the parameter pointer');
   //load the values from parameters pointer
 
   if processhandler.is64Bit {$ifdef cpu64}or targetself{$endif} then
@@ -587,19 +665,19 @@ begin
     for j:=0 to length(parameters)-1 do
     begin
       case parameters[j].contextitem of
-        0: s:='unsigned long long *'+parameters[j].varname+'=(unsigned long long *)*(unsigned long long *)((unsigned long long)parameters+0x228);'; //RAX
-        1..15: s:='unsigned long long *'+parameters[j].varname+'=(unsigned long long*)((unsigned long long)parameters+0x'+inttohex($200+(parameters[j].contextitem-1)*8,1)+');'; //RBX..R15
-        16: s:='float *'+parameters[j].varname+'=(float *)((unsigned long long)parameters+0x228);';
-        17..31: s:='float *'+parameters[j].varname+'=(float *)((unsigned long long)parameters+0x'+inttohex($200+(parameters[j].contextitem-1)*8,1)+');'; //RBX..R15
+        0: s:='unsigned long long '+parameters[j].varname+'=*(unsigned long long *)*(unsigned long long *)((unsigned long long)parameters+0x228);'; //RAX
+        1..15: s:='unsigned long long '+parameters[j].varname+'=*(unsigned long long*)((unsigned long long)parameters+0x'+inttohex($200+(parameters[j].contextitem-1)*8,1)+');'; //RBX..R15
+        16: s:='float '+parameters[j].varname+'=*(float *)((unsigned long long)parameters+0x228);';
+        17..31: s:='float '+parameters[j].varname+'=*(float *)((unsigned long long)parameters+0x'+inttohex($200+(parameters[j].contextitem-1)*8,1)+');'; //RBX..R15
         32..47:
         begin
           usesXMMType:=true;
-          s:='pxmmreg '+parameters[j].varname+'=(pxmmreg)((unsigned long long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-32)*16,1)+');';
+          s:='xmmreg '+parameters[j].varname+'=*(pxmmreg)((unsigned long long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-32)*16,1)+');';
         end;
-        48..111: s:='float *'+parameters[j].varname+'=(float *)((unsigned long long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-48)*4,1)+');'; //RBX..R15
-        112..143: s:='double *'+parameters[j].varname+'=(double *)((unsigned long long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-112)*8,1)+');';
+        48..111: s:='float '+parameters[j].varname+'=*(float *)((unsigned long long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-48)*4,1)+');'; //RBX..R15
+        112..143: s:='double '+parameters[j].varname+'=*(double *)((unsigned long long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-112)*8,1)+');';
       end;
-      cscript.insert(j+2,s);
+      cscript.add('  '+s);
     end;
   end
   else
@@ -607,33 +685,85 @@ begin
     for j:=0 to length(parameters)-1 do
     begin
       case parameters[j].contextitem of
-        0: s:='unsigned long *'+parameters[j].varname+'=(unsigned long *)*(unsigned long *)((unsigned long)parameters+0x214);'; //EAX
-        1..7: s:='unsigned long *'+parameters[j].varname+'=(unsigned long*)((unsigned long)parameters+0x'+inttohex($200+(parameters[j].contextitem-1)*4,1)+');'; //RBX..R15
-        16: s:='float *'+parameters[j].varname+'=(float *)((unsigned long)parameters+0x214);';
-        17..23: s:='float *'+parameters[j].varname+'=(float *)((unsigned long)parameters+0x'+inttohex($200+(parameters[j].contextitem-1)*4,1)+');'; //EBX..EBP
+        0: s:='unsigned long '+parameters[j].varname+'=*(unsigned long *)*(unsigned long *)((unsigned long)parameters+0x214);'; //EAX
+        1..7: s:='unsigned long '+parameters[j].varname+'=*(unsigned long*)((unsigned long)parameters+0x'+inttohex($200+(parameters[j].contextitem-1)*4,1)+');'; //RBX..R15
+        16: s:='float '+parameters[j].varname+'=*(float *)((unsigned long)parameters+0x214);';
+        17..23: s:='float '+parameters[j].varname+'=*(float *)((unsigned long)parameters+0x'+inttohex($200+(parameters[j].contextitem-1)*4,1)+');'; //EBX..EBP
         32..39:
         begin
           usesXMMType:=true;
-          s:='pxmmreg '+parameters[j].varname+'=(pxmmreg)((unsigned long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-32)*16,1)+');';
+          s:='xmmreg '+parameters[j].varname+'=*(pxmmreg)((unsigned long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-32)*16,1)+');';
         end;
-        48..79: s:='float *'+parameters[j].varname+'=(float *)((unsigned long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-48)*4,1)+');'; //EBX..EBP
-        112..127: s:='double *'+parameters[j].varname+'=(double *)((unsigned long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-112)*8,1)+');';
+        48..79: s:='float '+parameters[j].varname+'=*(float *)((unsigned long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-48)*4,1)+');'; //EBX..EBP
+        112..127: s:='double '+parameters[j].varname+'=*(double *)((unsigned long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-112)*8,1)+');';
       end;
-      cscript.insert(j+2,s);
+      cscript.add('  '+s);
     end;
   end;
 
+  cscript.add('  //start of user script');
   for j:=scriptstart+1 to scriptend-1 do
-    cscript.AddObject(script[j], script.objects[j]);
+  begin
+    tst:=ptruint(script.objects[j]);
+    cscript.AddObject(script[j], tobject(tst));
+  end;
+  cscript.add('  //end of user script');
+
+
+  //end of the script: write the values back
+
+  cscript.add('  //Write back values');
+
+  if processhandler.is64Bit {$ifdef cpu64}or targetself{$endif} then
+  begin
+    for j:=0 to length(parameters)-1 do
+    begin
+      case parameters[j].contextitem of
+        0: s:='*(unsigned long long *)*(unsigned long long *)((unsigned long long)parameters+0x228)='+parameters[j].varname+';'; //RAX
+        1..15: s:='*(unsigned long long*)((unsigned long long)parameters+0x'+inttohex($200+(parameters[j].contextitem-1)*8,1)+')='+parameters[j].varname+';'; //RBX..R15
+        16: s:='*(float *)((unsigned long long)parameters+0x228)='+parameters[j].varname+';';
+        17..31: s:='*(float *)((unsigned long long)parameters+0x'+inttohex($200+(parameters[j].contextitem-1)*8,1)+')='+parameters[j].varname+';'; //RBX..R15
+        32..47:
+        begin
+          usesXMMType:=true;
+          s:='*(pxmmreg)((unsigned long long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-32)*16,1)+')='+parameters[j].varname+';';
+        end;
+        48..111: s:='*(float *)((unsigned long long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-48)*4,1)+')='+parameters[j].varname+';'; //RBX..R15
+        112..143: s:='*(double *)((unsigned long long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-112)*8,1)+')='+parameters[j].varname+';';
+      end;
+      cscript.add('  '+s);
+    end;
+  end
+  else
+  begin
+    for j:=0 to length(parameters)-1 do
+    begin
+      case parameters[j].contextitem of
+        0: s:='*(unsigned long *)*(unsigned long *)((unsigned long)parameters+0x214)='+parameters[j].varname+';'; //EAX
+        1..7: s:='*(unsigned long*)((unsigned long)parameters+0x'+inttohex($200+(parameters[j].contextitem-1)*4,1)+')='+parameters[j].varname+';'; //RBX..R15
+        16: s:='*(float *)((unsigned long)parameters+0x214)='+parameters[j].varname+';';
+        17..23: s:='*(float *)((unsigned long)parameters+0x'+inttohex($200+(parameters[j].contextitem-1)*4,1)+')='+parameters[j].varname+';'; //EBX..EBP
+        32..39:
+        begin
+          usesXMMType:=true;
+          s:='*(pxmmreg)((unsigned long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-32)*16,1)+')='+parameters[j].varname+';';
+        end;
+        48..79: s:='*(float *)((unsigned long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-48)*4,1)+')='+parameters[j].varname+';'; //EBX..EBP
+        112..127: s:='*(double *)((unsigned long)parameters+0x'+inttohex($a0+(parameters[j].contextitem-112)*8,1)+')='+parameters[j].varname+';';
+      end;
+      cscript.add('  '+s);
+    end;
+  end;
 
   cscript.add('}');
 
 
+
   //allocate a spot for the linker stage to put the address
   if processhandler.is64Bit {$ifdef cpu64} or targetself{$endif} then
-    script.insert(0, 'alloc('+functionname+'_address,8)')
+    script.insert(0, {$ifdef windows}ifthen(DataForPass2.cdata.kernelAlloc,'k','')+{$endif}'alloc('+functionname+'_address,8)')
   else
-    script.insert(0, 'alloc('+functionname+'_address,4)');
+    script.insert(0, {$ifdef windows}ifthen(DataForPass2.cdata.kernelAlloc,'k','')+{$endif}'alloc('+functionname+'_address,4)');
 
   inc(scriptstart,1);
   inc(scriptend,1);
@@ -880,6 +1010,7 @@ var
   s, linenrstring: string;
   parameterstring: string;
   linenr: integer;
+  lnstart: integer;
   parameters:  TLuaCodeParams;
   hasAddedLuaServerCode: boolean=false;
   _tcc: TTCC;
@@ -891,10 +1022,21 @@ var
   //
 begin
   dataForPass2.cdata.cscript:=nil;
+  dataForPass2.cdata.address:=0;
+  dataForPass2.cdata.bytesize:=0;
   dataForPass2.cdata.usesxmm:=false;
+  dataForPass2.cdata.symbols:=[];
+  dataForPass2.cdata.linklist:=[];
+  dataForPass2.cdata.references:=[];
   dataForPass2.cdata.targetself:=false;
-  setlength(dataForPass2.cdata.linklist,0);
-  setlength(dataForPass2.cdata.references,0);
+  dataForPass2.cdata.symbolPrefix:='';
+  dataForPass2.cdata.nodebug:=false;
+  dataForPass2.cdata.sourceCodeInfo:=nil;
+  {$ifdef windows}
+  dataForPass2.cdata.kernelAlloc:=false;
+  {$endif}
+  //setlength(dataForPass2.cdata.linklist,0);
+  //setlength(dataForPass2.cdata.references,0);
 
 
 
@@ -905,7 +1047,7 @@ begin
       s:=script[i];
       if (length(s)>=4) and (s[1]='{') and (s[2]='$') and (s[3] in ['l','L','c','C']) then  //{$C or {$L
       begin
-        if (s[4] in ['u','U','c','C','}']) then  //{$CC, $CU, $LC, $LU , {$L}, {$C}
+        if (s[4] in ['u','U','c','C','}',' ']) then  //{$CC, $CU, $LC, $LU , {$L}, {$C},.. {$C ..., {$CU ....,....
         begin
           endpos:=pos('}',s);
           if endpos=-1 then
@@ -913,7 +1055,7 @@ begin
 
           uppercaseline:=uppercase(s);
 
-
+          {$ifdef windows}
           if copy(uppercaseline,1,9)='{$LUACODE' then
           begin
             if targetself or (processid=GetCurrentProcessId) then
@@ -945,17 +1087,21 @@ begin
             AutoAssemblerLuaCodePass(script, parameters, i, syntaxcheckonly)
           end
           else
-          if uppercaseline='{$C}' then
+          {$endif}
+          if copy(uppercaseline,1,3)='{$C' then
           begin
-            AutoAssemblerCBlockPass1(script, i, dataForPass2);
-          end
-          else
-          if copy(uppercaseline,1,7)='{$CCODE' then
-          begin
-            parameterstring:=copy(s,9,endpos-9);
-            setlength(parameters,0);
-            parseLuaCodeParameters(parameterstring, parameters);  //same data needed for C, so use it
-            AutoAssemblerCCodePass1(script, parameters, i,  dataForPass2, syntaxcheckonly, targetself);
+            if uppercaseline[4] in ['}',' '] then //{$C} {$C ....}
+            begin
+              AutoAssemblerCBlockPass1(script, i, dataForPass2);
+            end
+            else
+            if copy(uppercaseline,1,7)='{$CCODE' then
+            begin
+              parameterstring:=copy(s,9,endpos-9);
+              setlength(parameters,0);
+              parseLuaCodeParameters(parameterstring, parameters);  //same data needed for C, so use it
+              AutoAssemblerCCodePass1(script, parameters, i,  dataForPass2, syntaxcheckonly, targetself);
+            end;
           end;
         end;
       end;
@@ -986,6 +1132,26 @@ begin
         dataForPass2.cdata.cscript.insert(15,'} xmmreg, *pxmmreg;');
       end;
 
+
+      {
+      typedef struct {
+        union{
+          struct{
+              float f0;
+              float f1;
+              float f2;
+              float f3;
+          };
+          struct{
+              double d0;
+              double d1;
+          };
+          float fa[4];
+          double da[2];
+        };
+      } xmmreg, *pxmmreg;
+      }
+
       //testcompile the full script
       if targetself then
         _tcc:=tccself
@@ -1002,27 +1168,32 @@ begin
 
       try
         bytesizeneeded:=0;
-        if _tcc.testcompileScript(dataForPass2.cdata.cscript.text, bytesizeneeded,imports, symbols, errorlog)=false then
+        if _tcc.testcompileScript(dataForPass2.cdata.cscript.text, bytesizeneeded,imports, symbols, nil, errorlog)=false then
         begin
-          //example: <string>:6: error: 'fffff' undeclared
-          //search for <string>: and replace the linenumber with the AA script linenumber
+          //example: <string-12>:6: error: 'fffff' undeclared
+          //search for <string*>: and replace the linenumber with the AA script linenumber
           for i:=0 to errorlog.count-1 do
           begin
             s:=errorlog[i];
-            if s.StartsWith('<string>:') then
+            if s.StartsWith('<string') then
             begin
+              Clipboard.AsText:=dataForPass2.cdata.cscript.text;
+
               linenrstring:='';
-              for j:=10 to length(s) do
+              lnstart:=pos('>:', s)+2;
+
+              for j:=lnstart to length(s) do
               begin
                 if not (s[j] in ['0'..'9']) then
                 begin
-                  if j>10 then
+                  if j>lnstart then
                   begin
-                    linenrstring:=copy(s,10,j-10);
-                    linenr:=strtoint(linenrstring)-1;
+                    linenrstring:=copy(s,lnstart,j-lnstart);
+                    linenr:=strtoint(linenrstring);
                     //convert linenr to AA linenr (if possible)
                     if (linenr>=0) and (linenr<dataForPass2.cdata.cscript.count) then
                     begin
+                      Clipboard.AsText:=dataForPass2.cdata.cscript[linenr-1];
                       linenr:=integer(ptruint(dataForPass2.cdata.cscript.objects[linenr-1]));
                       s:='Error at line '+linenr.ToString+' '+Copy(s, j);
                     end;
@@ -1050,12 +1221,27 @@ begin
         for i:=imports.count to imports.count+length(dataforpass2.cdata.linklist)-1 do
           dataforpass2.cdata.references[i].name:=dataforpass2.cdata.linklist[i-imports.count].name;
 
-        setlength(dataforpass2.cdata.symbols, symbols.count);
-        for i:=0 to symbols.count-1 do
+        if dataforpass2.cdata.symbolPrefix<>'' then
+        begin //add another version with the prefix added
+          setlength(dataforpass2.cdata.symbols, symbols.count*2);
+          for i:=0 to symbols.count-1 do
+          begin
+            dataforpass2.cdata.symbols[i*2].name:=symbols[i shr 1];
+            dataforpass2.cdata.symbols[i*2].address:=0;
+            dataforpass2.cdata.symbols[i*2+1].name:=dataforpass2.cdata.symbolPrefix+'.'+symbols[i];
+            dataforpass2.cdata.symbols[i*2+1].address:=0;
+          end;
+        end
+        else
         begin
-          dataforpass2.cdata.symbols[i].name:=symbols[i];
-          dataforpass2.cdata.symbols[i].address:=0;
+          setlength(dataforpass2.cdata.symbols, symbols.count);
+          for i:=0 to symbols.count-1 do
+          begin
+            dataforpass2.cdata.symbols[i].name:=symbols[i];
+            dataforpass2.cdata.symbols[i].address:=0;
+          end;
         end;
+
 
 
       finally

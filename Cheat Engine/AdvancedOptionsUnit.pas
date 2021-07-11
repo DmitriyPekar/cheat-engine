@@ -17,7 +17,9 @@ uses
 
   symbolhandler,symbolhandlerstructs,LCLIntf, Messages, SysUtils, Classes, Graphics, Controls, Forms,
   Dialogs, StdCtrls, Buttons,CEDebugger, Menus,CEFuncProc, ExtCtrls,disassembler,
-  SyncObjs,registry, ComCtrls, LResources,NewKernelHandler{$ifdef windows},win32proc{$endif}, betterControls;
+  SyncObjs,registry, ComCtrls, LResources,NewKernelHandler{$ifdef windows},win32proc{$endif},
+  DPIHelper,
+  betterControls;
 
 
 
@@ -605,11 +607,14 @@ begin
 end;
 
 procedure TAdvancedOptions.miSetColorClick(Sender: TObject);
-var i: integer;
+var
+  i: integer;
+  cle: TCodeListEntry;
 begin
   if lvCodelist.Selected=nil then exit;
 
-  colordialog1.color:=TCodeListEntry(lvCodelist.selected.Data).color;
+  cle:=TCodeListEntry(lvCodelist.selected.Data);
+  colordialog1.color:=cle.color;
   if colordialog1.execute then
   begin
     for i:=0 to count-1 do
@@ -1157,6 +1162,8 @@ begin
 
   setlength(x,0);
   loadedFormPosition:=loadformposition(self,x);
+
+  DPIHelper.AdjustSpeedButtonSize(Pausebutton);
 end;
 
 procedure TAdvancedOptions.Button2Click(Sender: TObject);

@@ -2,11 +2,11 @@ object frmTracer: TfrmTracer
   Left = 1022
   Height = 535
   Top = 286
-  Width = 511
+  Width = 510
   BorderIcons = [biSystemMenu]
   Caption = 'Tracer'
   ClientHeight = 515
-  ClientWidth = 511
+  ClientWidth = 510
   Menu = MainMenu1
   OnClose = FormClose
   OnCreate = FormCreate
@@ -26,11 +26,11 @@ object frmTracer: TfrmTracer
     Left = 284
     Height = 515
     Top = 0
-    Width = 227
+    Width = 226
     Align = alRight
     BevelOuter = bvNone
     ClientHeight = 515
-    ClientWidth = 227
+    ClientWidth = 226
     Constraints.MinWidth = 20
     Font.Name = 'Courier New'
     ParentFont = False
@@ -55,43 +55,17 @@ object frmTracer: TfrmTracer
       ParentFont = False
       TabOrder = 0
     end
-    object lblInstruction: TLabel
-      AnchorSideLeft.Control = Panel1
-      AnchorSideTop.Control = Panel1
-      Left = 5
-      Height = 15
-      Top = 1
-      Width = 57
-      BorderSpacing.Left = 5
-      BorderSpacing.Top = 1
-      Caption = 'Instruction'
-      ParentColor = False
-      ParentFont = False
-    end
-    object lblAddressed: TLabel
-      AnchorSideLeft.Control = lblInstruction
-      AnchorSideTop.Control = lblInstruction
-      AnchorSideTop.Side = asrBottom
-      Left = 5
-      Height = 22
-      Top = 18
-      Width = 204
-      BorderSpacing.Top = 2
-      Caption = 'Accesses Address:'
-      Font.Name = 'Courier New'
-      ParentColor = False
-      ParentFont = False
-    end
     object pnlRegisters: TPanel
-      AnchorSideLeft.Control = lblAddressed
-      AnchorSideTop.Control = lblAddressed
+      AnchorSideLeft.Control = Panel1
+      AnchorSideTop.Control = Panel4
       AnchorSideTop.Side = asrBottom
-      Left = 5
+      Left = 0
       Height = 210
       Hint = 'Rightclick to copy to clipboard'#13#10'Middleclick to ignore it when comparing traces'
-      Top = 40
+      Top = 37
       Width = 120
       AutoSize = True
+      BorderSpacing.Top = 4
       BevelOuter = bvNone
       ChildSizing.VerticalSpacing = 6
       ChildSizing.Layout = cclLeftToRightThenTopToBottom
@@ -217,9 +191,9 @@ object frmTracer: TfrmTracer
       AnchorSideLeft.Control = pnlRegisters
       AnchorSideTop.Control = pnlRegisters
       AnchorSideTop.Side = asrBottom
-      Left = 5
+      Left = 0
       Height = 162
-      Top = 280
+      Top = 277
       Width = 84
       AutoSize = True
       BorderSpacing.Top = 30
@@ -299,9 +273,9 @@ object frmTracer: TfrmTracer
       AnchorSideTop.Control = pnlRegisters
       AnchorSideRight.Control = Panel1
       AnchorSideRight.Side = asrBottom
-      Left = 169
+      Left = 168
       Height = 190
-      Top = 40
+      Top = 37
       Width = 48
       Anchors = [akTop, akRight]
       AutoSize = True
@@ -321,9 +295,7 @@ object frmTracer: TfrmTracer
         Top = 0
         Width = 48
         Caption = 'CF 0'
-        Font.Name = 'Courier New'
         ParentColor = False
-        ParentFont = False
       end
       object pflabel: TLabel
         Left = 0
@@ -331,9 +303,7 @@ object frmTracer: TfrmTracer
         Top = 28
         Width = 48
         Caption = 'PF 0'
-        Font.Name = 'Courier New'
         ParentColor = False
-        ParentFont = False
       end
       object aflabel: TLabel
         Left = 0
@@ -341,9 +311,7 @@ object frmTracer: TfrmTracer
         Top = 56
         Width = 48
         Caption = 'AF 0'
-        Font.Name = 'Courier New'
         ParentColor = False
-        ParentFont = False
       end
       object zflabel: TLabel
         Left = 0
@@ -351,9 +319,7 @@ object frmTracer: TfrmTracer
         Top = 84
         Width = 48
         Caption = 'ZF 0'
-        Font.Name = 'Courier New'
         ParentColor = False
-        ParentFont = False
       end
       object sflabel: TLabel
         Left = 0
@@ -361,9 +327,7 @@ object frmTracer: TfrmTracer
         Top = 112
         Width = 48
         Caption = 'SF 0'
-        Font.Name = 'Courier New'
         ParentColor = False
-        ParentFont = False
       end
       object dflabel: TLabel
         Left = 0
@@ -371,9 +335,7 @@ object frmTracer: TfrmTracer
         Top = 140
         Width = 48
         Caption = 'DF 0'
-        Font.Name = 'Courier New'
         ParentColor = False
-        ParentFont = False
       end
       object oflabel: TLabel
         Left = 0
@@ -381,9 +343,7 @@ object frmTracer: TfrmTracer
         Top = 168
         Width = 48
         Caption = 'OF 0'
-        Font.Name = 'Courier New'
         ParentColor = False
-        ParentFont = False
       end
     end
     object Panel7: TPanel
@@ -391,7 +351,7 @@ object frmTracer: TfrmTracer
       AnchorSideTop.Side = asrCenter
       AnchorSideRight.Control = Panel1
       AnchorSideRight.Side = asrBottom
-      Left = 195
+      Left = 194
       Height = 38
       Top = 240
       Width = 32
@@ -440,6 +400,41 @@ object frmTracer: TfrmTracer
         ShowHint = True
         ParentFont = False
         ParentShowHint = False
+      end
+    end
+    object Panel4: TPanel
+      Left = 0
+      Height = 33
+      Top = 0
+      Width = 226
+      Align = alTop
+      AutoSize = True
+      BevelOuter = bvNone
+      ClientHeight = 33
+      ClientWidth = 226
+      ParentFont = False
+      TabOrder = 5
+      object lblInstruction: TLabel
+        Left = 0
+        Height = 15
+        Top = 1
+        Width = 57
+        BorderSpacing.Top = 1
+        Caption = 'Instruction'
+        ParentColor = False
+        ParentFont = False
+      end
+      object lblAddressed: TLabel
+        AnchorSideLeft.Control = lblInstruction
+        AnchorSideTop.Control = lblInstruction
+        AnchorSideTop.Side = asrBottom
+        Left = 0
+        Height = 15
+        Top = 18
+        Width = 95
+        BorderSpacing.Top = 2
+        Caption = 'Accesses Address:'
+        ParentColor = False
       end
     end
   end

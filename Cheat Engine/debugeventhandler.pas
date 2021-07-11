@@ -20,6 +20,10 @@ uses
 
 type
   TContextFields=(cfAll,cfDebug, cfRegisters, cfFloat);
+
+  TDebugThreadHandler=class;
+  THandleBreakEvent=function(sender: TDebugThreadHandler; bp: PBreakpoint): boolean of object;
+
   TDebugEventHandler = class;
 
   TDebugThreadHandler = class
@@ -71,14 +75,15 @@ type
 
 
     currentBP: PBreakpoint;
+    dbvm_currentCR3: qword;
 
+    fOnHandleBreakAsync: THandleBreakEvent;
 
     function CheckIfConditionIsMet(bp: PBreakpoint; script: string=''): boolean;
     function InNoBreakList: boolean;
 
     function HandleAccessViolationDebugEvent(debugEvent: TDEBUGEVENT; var dwContinueStatus: dword): boolean;
     function HandleExceptionDebugEvent(debugEvent: TDEBUGEVENT; var dwContinueStatus: dword): boolean;
-    //even though it's private, it's accessible from this unit
     function CreateThreadDebugEvent(debugEvent: TDEBUGEVENT; var dwContinueStatus: dword): boolean;
     function CreateProcessDebugEvent(debugEvent: TDEBUGEVENT; var dwContinueStatus: dword): boolean;
     function ExitThreadDebugEvent(debugevent: TDEBUGEVENT; var dwContinueStatus: dword): boolean;
@@ -101,11 +106,13 @@ type
     procedure ContinueFromBreakpoint(bp: PBreakpoint; continueoption: TContinueOption; isTracerStepOver: boolean=false);
     function EnableOriginalBreakpointAfterThisBreakpointForThisThread(bp: Pbreakpoint; OriginalBreakpoint: PBreakpoint): boolean;
 
+    procedure foundCodeDialog_AddRecord;
+    procedure frmchangedaddresses_AddRecord;
+
     //sync functions
     procedure visualizeBreak;
     procedure AddDebugEventString;
-    procedure foundCodeDialog_AddRecord;
-    procedure frmchangedaddresses_AddRecord;
+
   public
     isHandled: boolean; //set to true if this thread is the current debug target
     needstocleanup: boolean;
@@ -138,6 +145,7 @@ type
     property isWaitingToContinue: boolean read WaitingToContinue;
     property isUnhandledException: boolean read unhandledException;
     property lastUnhandledExceptionCode: dword read unhandledExceptionCode;
+    property OnHandleBreakAsync: THandleBreakEvent read fOnHandleBreakAsync write fOnHandleBreakAsync;
   end;
 
   TDebugEventHandler = class
@@ -164,52 +172,111 @@ uses foundcodeunit, DebugHelper, MemoryBrowserFormUnit, frmThreadlistunit,
      frmDebugEventsUnit, formdebugstringsunit, symbolhandler,
      networkInterface, networkInterfaceApi, ProcessHandlerUnit, globals,
      UnexpectedExceptionsHelper, frmcodefilterunit, frmBranchMapperUnit, LuaHandler,
-     LazLogger, Dialogs;
+     LazLogger, Dialogs, vmxfunctions, debuggerinterface, DBVMDebuggerInterface,formChangedAddresses;
 
 resourcestring
   rsDebugHandleAccessViolationDebugEventNow = 'Debug HandleAccessViolationDebugEvent now';
   rsSpecialCase = 'Special case';
 
 procedure TDebugThreadHandler.frmchangedaddresses_AddRecord;
+//7.3 Not async anymore
+var
+  address: ptruint;
+  haserror: boolean;
+  e: TaddressEntry;
+
+  s: string;
+
+  f: Tfrmchangedaddresses;
 begin
   TDebuggerthread(debuggerthread).execlocation:=44;
 
-  if (((currentbp.breakpointMethod=bpmException) and not currentbp.markedfordeletion) or currentBP.active) and (currentBP.frmchangedaddresses<>nil) then
-    currentbp.frmchangedaddresses.AddRecord;
+  f:=currentbp^.frmchangedaddresses;
+  address:=symhandler.getAddressFromName(f.equation, false, haserror, context);
+  if not haserror then
+  begin
+    e:=nil;
+    f.addresslistCS.Enter;
+    try
+      if f.addresslist.GetData(address, e) then
+      begin
+        inc(e.count);
+        e.changed:=true; //the gui sets this to false after reading/parsing the value
+        exit;
+      end;
+
+      //still here so a new address
+      s:=inttohex(address,8);
+      if (f.foundcodedialog=nil) or (f.foundCount<8) then
+      begin
+        e:=TAddressEntry.create(f);
+        e.context:=context^;
+        e.address:=address;
+        e.count:=1;
+        e.changed:=true;
+        e.savestack;
+        f.addresslist.Add(address,e);
+      end;
+
+
+    finally
+      f.addresslistCS.Leave;
+    end;
+
+    if e<>nil then
+    begin
+      f.newRecord:=e;
+      TThread.Synchronize(TThread.CurrentThread, f.AddRecord);
+    end;
+  end;
 end;
 
 procedure TDebugThreadHandler.foundCodeDialog_AddRecord;
-begin
-  TDebuggerthread(debuggerthread).execlocation:=43;
+//7.3: Not ASYNC
+var
+  address, address2: ptruint;
+  desc: string;
+  d: TDisassembler;
+  hasAddress: boolean;
 
+  cr: FoundcodeUnit.Tcoderecord;
+begin
   if (((currentbp.breakpointMethod=bpmException) and not currentbp.markedfordeletion) or currentBP.active) and (currentbp.FoundcodeDialog<>nil) then  //it could have been deactivated
   begin
-    TDebuggerthread(debuggerthread).execlocation:=431;
-    currentBP.FoundcodeDialog.usesdebugregs:=currentBP.breakpointMethod=bpmDebugRegister;
-    currentBP.FoundcodeDialog.useexceptions:=currentBP.breakpointMethod=bpmException;
-
-    TDebuggerthread(debuggerthread).execlocation:=432;
-
-    if currentBP.FoundcodeDialog<>nil then
-    begin
-      try
-        currentBP.FoundcodeDialog.AddRecord;
-      except
-        on e:exception do
-          outputdebugstring('old error 432: currentBP.FoundcodeDialog.AddRecord: '+e.message);
-      end;
-    end
+    if processhandler.SystemArchitecture=archARM then
+      address:=armcontext.PC
     else
-      outputdebugstring('old error 432: foundCodeDialog_AddRecord: currentBP.FoundcodeDialog is nil');
+    begin
+      address:=context.{$ifdef cpu64}Rip{$else}eip{$endif};
+      if (currentBP.breakpointMethod=bpmDebugRegister) or (currentBP.breakpointMethod=bpmException) then //find out the previous opcode
+      begin
+        address2:=address;
+        d:=TDisassembler.Create;
+        d.disassemble(address2,desc);
+        if copy(d.LastDisassembleData.opcode,1,3)<>'REP' then
+          address:=previousopcode(address,d);
 
-    TDebuggerthread(debuggerthread).execlocation:=433;
-  end
-  else
-  begin
-   // beep;
+        freeandnil(d);
+      end;
+    end;
+
+
+    //check if this address is in the list, and if not, add it (sync), else increase the counter
+    currentBP^.FoundcodeDialog.seenAddressListCS.Enter;
+
+    hasAddress:=currentBP^.FoundcodeDialog.seenAddressList.GetData(address, cr);
+    if hasAddress then
+      cr.hitcount:=cr.hitcount+1;
+
+    currentBP^.FoundcodeDialog.seenAddressListCS.Leave;
+
+    //not in the list, add it:
+    if hasAddress=false then
+    begin
+      currentBP^.FoundcodeDialog.addRecord_Address:=address;
+      TDebuggerthread(debuggerthread).Synchronize(TThread.CurrentThread,currentBP^.FoundcodeDialog.AddRecord);
+    end;
   end;
-
-  TDebuggerthread(debuggerthread).execlocation:=439;
 end;
 
 procedure TDebugThreadHandler.AddDebugEventString;
@@ -265,9 +332,12 @@ begin
 
   TDebuggerthread(debuggerthread).execlocation:=412;
 
-
   if WaitingToContinue and (TDebuggerthread(debuggerthread).CurrentThread<>nil) then //no lua script or it returned 0, or it DID continue and returned 0...
   begin
+    if currentdebuggerinterface is TDBVMDebugInterface then
+      memorybrowser.cr3:=dbvm_currentCR3;
+
+
     TDebuggerthread(debuggerthread).execlocation:=413;
     MemoryBrowser.UpdateDebugContext(self.Handle, self.ThreadId, true, TDebuggerthread(debuggerthread));
   end;
@@ -283,7 +353,7 @@ var
   pb: PByteArray;
 begin
 
-  if handle<>0 then
+  if (handle<>0) or ((currentdebuggerinterface.controlsTheThreadList=false) and ishandled) then
   begin
     debuggercs.enter;
 
@@ -316,7 +386,7 @@ var
 begin
   outputdebugstring(pchar(format('setThreadContext(%x, %x, %p). dr0=%x dr1=%x dr2=%x dr3=%x dr7=%x',[threadid, handle,context, context^.dr0, context^.dr1, context^.dr2, context^.dr3, context^.dr7])));
 
-  if handle<>0 then
+  if (handle<>0) or ((currentdebuggerinterface.controlsTheThreadList=false) and ishandled) then
   begin
     debuggercs.enter;
 
@@ -357,34 +427,42 @@ end;
 
 procedure TDebugThreadHandler.breakThread;
 begin
-  debuggercs.enter;
-  suspend;
+  if dbcCanUseInt1BasedBreakpoints in CurrentDebuggerInterface.DebuggerCapabilities then
+  begin
+    debuggercs.enter;
+    suspend;
 
-  fillContext;
-  context^.eflags:=eflags_setTF(context^.eflags,1);
-  SingleStepping:=true;
+    fillContext;
+    context^.eflags:=eflags_setTF(context^.eflags,1);
+    SingleStepping:=true;
 
-  setContext;
-  resume;
-  debuggercs.leave;
+    setContext;
+    resume;
+    debuggercs.leave;
+  end
+  else
+    raise exception.create('The current debuggerinterface does not support int1 based breakpoints');
 end;
 
 procedure TDebugThreadHandler.clearDebugRegisters;
 begin
-  debuggerCS.enter;
-  suspend;
-  fillContext;
-  context^.dr0:=0;
-  context^.dr1:=0;
-  context^.dr2:=0;
-  context^.dr3:=0;
-  context^.dr6:=0;
-  context^.dr7:=0;
-  SingleStepping:=true;
+  if CurrentDebuggerInterface.usesDebugRegisters then
+  begin
+    debuggerCS.enter;
+    suspend;
+    fillContext;
+    context^.dr0:=0;
+    context^.dr1:=0;
+    context^.dr2:=0;
+    context^.dr3:=0;
+    context^.dr6:=0;
+    context^.dr7:=0;
+    SingleStepping:=true;
 
-  setContext(cfDebug);
-  resume;
-  debuggercs.leave;
+    setContext(cfDebug);
+    resume;
+    debuggercs.leave;
+  end;
 end;
 
 function booltoint(b: boolean):integer; inline;
@@ -414,6 +492,7 @@ begin
   if bp.changereg.change_esi then context^.{$ifdef cpu64}rsi{$else}esi{$endif}:=bp.changereg.new_esi;
   if bp.changereg.change_edi then context^.{$ifdef cpu64}rdi{$else}edi{$endif}:=bp.changereg.new_edi;
   if bp.changereg.change_esp then context^.{$ifdef cpu64}rsp{$else}esp{$endif}:=bp.changereg.new_esp;
+  if bp.changereg.change_ebp then context^.{$ifdef cpu64}rbp{$else}ebp{$endif}:=bp.changereg.new_ebp;
   if bp.changereg.change_eip then context^.{$ifdef cpu64}rip{$else}eip{$endif}:=bp.changereg.new_eip;
 
   {$ifdef cpu64}
@@ -517,7 +596,8 @@ var oldprotect: dword;
 begin
   TDebuggerthread(debuggerthread).execlocation:=39;
   debuggercs.enter;
-  context^.EFlags:=eflags_setTF(context^.EFlags,0);
+  if CurrentDebuggerInterface.usesDebugRegisters then
+    context^.EFlags:=eflags_setTF(context^.EFlags,0);
 
   try
     if (bp<>nil) then
@@ -625,8 +705,8 @@ begin
       if (not singlestepping) and ((bp.ThreadID<>0) and (bp.threadid<>self.ThreadId)) then
       begin
         //not singlestepping and this breakpoint isn't set to break for this thread, so:
-
-        context^.EFlags:=eflags_setRF(context^.EFlags,1);//don't break on the current instruction
+        if dbcCanUseInt1BasedBreakpoints in CurrentDebuggerInterface.DebuggerCapabilities then
+          context^.EFlags:=eflags_setRF(context^.EFlags,1);//don't break on the current instruction
 
         exit; //and exit
       end;
@@ -643,7 +723,8 @@ begin
         if (bp=nil) or (bp.breakpointMethod=bpmDebugRegister) then
         begin
           //it's a debug register breakpoint or single step, we can continue by just setting the RF flag so it won't break on next execution
-          context^.EFlags:=eflags_setRF(context^.EFlags,1);
+          if dbcCanUseInt1BasedBreakpoints in CurrentDebuggerInterface.DebuggerCapabilities then
+            context^.EFlags:=eflags_setRF(context^.EFlags,1);
         end
 
       end;
@@ -659,12 +740,17 @@ begin
         end;
         singlestepping:=true;
         if (bp=nil) or (bp.breakpointMethod=bpmDebugRegister) then
-          context^.EFlags:=eflags_setRF(context^.EFlags,1);//don't break on the current instruction
+          if dbcCanUseInt1BasedBreakpoints in CurrentDebuggerInterface.DebuggerCapabilities then
+            context^.EFlags:=eflags_setRF(context^.EFlags,1);//don't break on the current instruction
 
         if continueoption=co_stepinto then
-          context^.EFlags:=eflags_setTF(context^.EFlags,1) //set the trap flag
+        begin
+          if dbcCanUseInt1BasedBreakpoints in CurrentDebuggerInterface.DebuggerCapabilities then
+            context^.EFlags:=eflags_setTF(context^.EFlags,1) //set the trap flag
+        end
         else
         begin
+          //step over
           //check if the current instruction is a call, if not, single step, else set a "run till" breakpoint (that doesn't cancel the stepping)
           d:=TDisassembler.Create;
           nexteip:=context^.{$ifdef cpu64}rip{$else}eip{$endif};
@@ -672,13 +758,24 @@ begin
           if d.LastDisassembleData.iscall then
           begin
             //set an execute breakpoint for this thread only at the next instruction and run till there
-            setContext;
+            if CurrentDebuggerInterface.usesDebugRegisters then
+              setContext;
+
             b:=TDebuggerthread(debuggerthread).SetOnExecuteBreakpoint(nexteip , false, ThreadId);
-            b.OneTimeOnly:=true;
-            b.isTracerStepOver:=isTracerStepOver;
+            if b<>nil then
+            begin
+              b.OneTimeOnly:=true;
+              b.isTracerStepOver:=isTracerStepOver;
+            end;
+
+            if CurrentDebuggerInterface is TDBVMDebugInterface then
+              singlestepping:=false; //dbvm checks this var if it should be a single step or not
           end
           else  //if not, single step
-            context^.EFlags:=eflags_setTF(context^.EFlags,1);
+          begin
+            if dbcCanUseInt1BasedBreakpoints in CurrentDebuggerInterface.DebuggerCapabilities then
+              context^.EFlags:=eflags_setTF(context^.EFlags,1);
+          end;
 
           freeandnil(d);
 
@@ -742,25 +839,34 @@ end;
 
 procedure TDebugThreadHandler.StartBranchMap;
 begin
-  suspend;
-  fillContext;
-  context^.Dr7:=context^.Dr7 or $300;
-  context^.EFlags:=context^.EFlags or EFLAGS_TF;
-  setContext;
-  isBranchMapping:=true;
-  branchMappingDisabled:=0;
-  resume;
+  if dbcCanUseInt1BasedBreakpoints in CurrentDebuggerInterface.DebuggerCapabilities then
+  begin
+    suspend;
+    fillContext;
+    context^.Dr7:=context^.Dr7 or $300;
+    context^.EFlags:=context^.EFlags or EFLAGS_TF;
+    setContext;
+    isBranchMapping:=true;
+    branchMappingDisabled:=0;
+    resume;
+  end
+  else
+    raise exception.create('StartBranchMap can not function with this debugger interface');
+
 end;
 
 procedure TDebugThreadHandler.StopBranchMap;
 begin
-  suspend;
-  fillContext;
-  context^.Dr7:=context^.Dr7 and (not $300);
-  context^.EFlags:=context^.EFlags and (not EFLAGS_TF);
-  setContext;
-  branchMappingDisabled:=getTickCount64;
-  resume;
+  if dbcCanUseInt1BasedBreakpoints in CurrentDebuggerInterface.DebuggerCapabilities then
+  begin
+    suspend;
+    fillContext;
+    context^.Dr7:=context^.Dr7 and (not $300);
+    context^.EFlags:=context^.EFlags and (not EFLAGS_TF);
+    setContext;
+    branchMappingDisabled:=getTickCount64;
+    resume;
+  end; //fail silently
 end;
 
 procedure TDebugThreadHandler.TracerQuit;
@@ -770,7 +876,8 @@ begin
   if isTracing then
   begin
     fillContext;
-    context^.EFlags:=eflags_setTF(context^.EFlags,0); //unsef TF
+    if dbcCanUseInt1BasedBreakpoints in CurrentDebuggerInterface.DebuggerCapabilities then
+      context^.EFlags:=eflags_setTF(context^.EFlags,0); //unset TF
   end;
 
   TDebuggerthread(debuggerthread).execlocation:=45;
@@ -891,20 +998,28 @@ begin
 end;
 
 procedure TDebugThreadHandler.HandleBreak(bp: PBreakpoint; var dwContinueStatus: dword);
+var handledByOnHandleBreakAsync: boolean;
 begin
 
   TDebuggerthread(debuggerthread).execlocation:=38;
 
+  handledByOnHandleBreakAsync:=false;
+  if assigned(fOnHandleBreakAsync) then
+    handledByOnHandleBreakAsync:=fOnHandleBreakAsync(self, bp);
+
 
   //synchronize(VisualizeBreak);
   //go to sleep and wait for an event that wakes it up. No need to worry about deleted breakpoints, since the cleanup will not be called until this routine exits
-  TDebuggerthread(debuggerthread).synchronize(TDebuggerthread(debuggerthread), VisualizeBreak);
-
-  if WaitingToContinue then
+  if handledByOnHandleBreakAsync=false then
   begin
-    //Outputdebugstring('updated gui');
-    onContinueEvent.WaitFor(infinite);
-    //Outputdebugstring('returned from gui');
+    TDebuggerthread(debuggerthread).synchronize(TDebuggerthread(debuggerthread), VisualizeBreak);
+
+    if WaitingToContinue then
+    begin
+      //Outputdebugstring('updated gui');
+      onContinueEvent.WaitFor(infinite);
+      //Outputdebugstring('returned from gui');
+    end;
   end;
 
   if continueHandled then
@@ -1063,57 +1178,58 @@ begin
   bpp2:=nil;
   bpp:=nil;
 
-  if (debugreg=-1) and (frmCodeFilter<>nil) and frmCodeFilter.handleBreakpoint(address) then  //callfilter
+  //
+  if (debugreg<0) and (frmCodeFilter<>nil) and frmCodeFilter.handleBreakpoint(address) then  //callfilter
   begin
     dwContinueStatus:=DBG_CONTINUE;
     exit(true);
   end;
 
-  if not found then
+
+  debuggercs.enter;
+
+  for i := 0 to breakpointlist.Count - 1 do
   begin
-    debuggercs.enter;
+    bpp:=PBreakpoint(breakpointlist.Items[i]);
 
-    for i := 0 to breakpointlist.Count - 1 do
+    if InRangeX(address, bpp.address, bpp.address+bpp.size-1) then
     begin
-      bpp:=PBreakpoint(breakpointlist.Items[i]);
-
-      if InRangeX(address, bpp.address, bpp.address+bpp.size-1) then
-      begin
-        if (CurrentDebuggerInterface.canReportExactDebugRegisterTrigger) and (debugreg in [0..4]) and (bpp.breakpointMethod=bpmDebugRegister) and (bpp.debugRegister<>debugreg) then
-          continue; //this is not the correct breakpoint. Skip it
+      if (CurrentDebuggerInterface.canReportExactDebugRegisterTrigger) and (debugreg in [0..4]) and (bpp.breakpointMethod=bpmDebugRegister) and (bpp.debugRegister<>debugreg) then
+        continue; //this is not the correct breakpoint. Skip it
 
 
-        found:=true;
-        bpp2:=bpp;
-        active:=bpp^.active;
+      found:=true;
+      bpp2:=bpp;
+      active:=bpp^.active;
 
-        if active and bpp^.OneTimeOnly then //mark for deletion
-          TdebuggerThread(debuggerthread).RemoveBreakpoint(bpp);
+      if active and bpp^.OneTimeOnly then //mark for deletion
+        TdebuggerThread(debuggerthread).RemoveBreakpoint(bpp);
 
-        if ((bpp.breakpointMethod=bpmException) and (not bpp.markedfordeletion)) or active then
-          break;
+      if ((bpp.breakpointMethod=bpmException) and (not bpp.markedfordeletion)) or active then
+        break;
 
-        //else continue looking for one that IS active and not deleted
-      end;
+      //else continue looking for one that IS active and not deleted
     end;
-
-    debuggercs.leave;
-
   end;
+
+  debuggercs.leave;
+
 
   TDebuggerthread(debuggerthread).execlocation:=27;
 
 
   if found then
   begin
-    currentBP:=bpp;
-
+    if bpp^.owner<>nil then
+      currentbp:=bpp^.owner
+    else
+      currentbp:=bpp;   //always use the main, the children may get screwed over
 
     bpp:=bpp2;
     outputdebugstring('Handling breakpoint');
 
     //to handle a debug register being handled before the single step (since xp sucks and doesn't do rf)
-    if setInt3Back then //on a failt this will set the state to as it was expected, on a trap this will set the breakpoint back. Both valid
+    if setInt3Back then //on a fault this will set the state to as it was expected, on a trap this will set the breakpoint back. Both valid
     begin
       vpe:=(SkipVirtualProtectEx=false) and VirtualProtectEx(Processhandle, pointer(Int3setbackAddress), 1, PAGE_EXECUTE_READWRITE, oldprotect);
       WriteProcessMemory(processhandle, pointer(Int3setbackAddress), @int3byte, 1, bw);
@@ -1240,6 +1356,10 @@ begin
 
         ModifyRegisters(bpp);
 
+        if CurrentDebuggerInterface is TDBVMDebugInterface then
+          setContext;
+
+
         //and
         continueFromBreakpoint(bpp, co_run); //just continue running
       end;
@@ -1251,8 +1371,8 @@ begin
 
         if ((bpp.breakpointMethod=bpmException) and (not bpp.markedfordeletion)) or bpp.active then
         begin
-          TDebuggerthread(debuggerthread).Synchronize(TDebuggerthread(debuggerthread), foundCodeDialog_AddRecord);
-          TDebuggerthread(debuggerthread).guiupdate:=true;
+
+          foundCodeDialog_AddRecord;
 
           if CurrentDebuggerInterface is TNetworkDebuggerInterface then
             continueFromBreakpoint(bpp, co_run);  //explicitly continue from this breakpoint
@@ -1264,8 +1384,11 @@ begin
       bo_FindWhatCodeAccesses:
       begin
         TDebuggerthread(debuggerthread).execlocation:=33;
+        frmchangedaddresses_AddRecord;
+
+        {TDebuggerthread(debuggerthread).execlocation:=33;
         TDebuggerthread(debuggerthread).Synchronize(TDebuggerthread(debuggerthread), frmchangedaddresses_AddRecord);
-        TDebuggerthread(debuggerthread).guiupdate:=true;
+        TDebuggerthread(debuggerthread).guiupdate:=true;  }
 
         continueFromBreakpoint(bpp, co_run); //just continue running
       end;
@@ -1461,11 +1584,13 @@ begin
 end;
 
 
+
 function TDebugThreadHandler.HandleExceptionDebugEvent(debugEvent: TDEBUGEVENT; var dwContinueStatus: dword): boolean;
 var
   exceptionAddress: ptrUint;
   i: integer;
   bp: PBreakpoint;
+  found: boolean;
 begin
   TDebuggerthread(debuggerthread).execlocation:=16;
   unhandledException:=false;
@@ -1477,6 +1602,51 @@ begin
 
 
   case debugEvent.Exception.ExceptionRecord.ExceptionCode of
+    EXCEPTION_DBVM_BREAKPOINT:
+    begin
+      outputdebugstring('EXCEPTION_DBVM_BREAKPOINT');
+
+
+      if (debugevent.Exception.ExceptionRecord.NumberParameters>=6) and (debugevent.Exception.ExceptionRecord.ExceptionInformation[5]=1) then
+        dbvm_currentCR3:=debugevent.Exception.ExceptionRecord.ExceptionInformation[1] and MAXPHYADDRMASKPB
+      else
+        dbvm_currentCR3:=0;
+
+
+      //dwContinueStatus supports DBG_CONTINUE_SINGLESTEP
+      if debugEvent.Exception.ExceptionRecord.ExceptionFlags=dword(-1) then
+        result:= singleStep(dwContinueStatus)
+      else
+      begin
+        found:=false;
+        debuggercs.enter;
+        for i := 0 to breakpointlist.Count - 1 do
+        begin
+          bp:=PBreakpoint(breakpointlist.Items[i]);
+          if bp^.active and
+             (bp^.breakpointMethod=bpmDBVMNative) and
+             (bp^.dbvmwatchid=debugEvent.Exception.ExceptionRecord.ExceptionFlags)
+          then
+          begin
+            found:=true;
+            break;
+          end;
+        end;
+        debuggerCS.leave;
+
+        if found then
+          Result := DispatchBreakpoint(bp^.address, -2, dwContinueStatus)
+        else
+          Result := DispatchBreakpoint(context^.{$ifdef cpu64}Rip{$else}eip{$endif}, -2, dwContinueStatus);
+      end;
+
+      if singlestepping then
+        dwContinueStatus:=DBG_CONTINUE_SINGLESTEP
+      else
+        dwContinueStatus:=DBG_CONTINUE;
+
+    end;
+
     EXCEPTION_BREAKPOINT, STATUS_WX86_BREAKPOINT: //SW bp
     begin
       OutputDebugString('EXCEPTION_BREAKPOINT:'+inttohex(context^.{$ifdef cpu64}rip{$else}eip{$endif},8));
@@ -1679,7 +1849,10 @@ begin
       if debugevent.CreateThread.hThread<>0 then
         closehandle(handle);
 
-      handle  := OpenThread(THREAD_ALL_ACCESS, false, threadid );
+      if currentdebuggerinterface.controlsTheThreadList then
+        handle  := OpenThread(THREAD_ALL_ACCESS, false, threadid )
+      else
+        handle := 0;
     end;
   end;
 
@@ -1992,10 +2165,6 @@ begin
       ThreadList.Remove(currentThread);
       currentThread.Free;
       currentthread:=nil;
-
-
-
-
     end;
 
     debuggercs.leave;
@@ -2031,18 +2200,13 @@ begin
   debuggercs.leave;
 
   //The most important data has been gathered (DR6 of the thread). it's safe from this point to occasionally release the lock
+  currentdebugEvent:=debugEvent;
 
   if newthread and (frmthreadlist<>nil) then
-  begin
-    currentdebugEvent:=debugEvent;
     TDebuggerthread(debuggerthread).Synchronize(TDebuggerthread(debuggerthread), updatethreadlist);
-  end;
 
   if frmDebugEvents<>nil then
-  begin
-    currentdebugEvent:=debugEvent;
     TDebuggerthread(debuggerthread).Synchronize(TDebuggerthread(debuggerthread), UpdateDebugEventWindow);
-  end;
 
 
   TDebuggerthread(debuggerthread).execlocation:=11;
@@ -2057,7 +2221,6 @@ begin
     UNLOAD_DLL_DEBUG_EVENT:     Result := currentThread.UnloadDLLDebugEvent(debugEvent, dwContinueStatus);
     OUTPUT_DEBUG_STRING_EVENT:  Result := currentThread.OutputDebugStringEvent(debugEvent, dwContinueStatus);
     RIP_EVENT:                  Result := currentThread.RipEvent(debugEvent, dwContinueStatus);
-
     else
                                 Result := currentThread.HandleUnknownEvent(debugEvent, dwContinueStatus);
   end;
@@ -2068,8 +2231,7 @@ begin
 
   //cleanup time for this thread
 
-
-  if (currentthread<>nil) then //if it wasn't a thread destruction tell this thread it isn't being handled anymore
+  if (currentthread<>nil) and CurrentDebuggerInterface.usesDebugRegisters then //if it wasn't a thread destruction tell this thread it isn't being handled anymore
   begin
     debuggercs.enter; //wait till other threads are done with this
 
@@ -2166,6 +2328,8 @@ begin
       OUTPUT_DEBUG_STRING_EVENT: eventtext:='OUTPUT_DEBUG_STRING_EVENT';
       RIP_EVENT: eventtext:='RIP_EVENT';
       UNLOAD_DLL_DEBUG_EVENT: eventtext:='UNLOAD_DLL_DEBUG_EVENT';
+      else
+        eventtext:='Unknown event '+inttostr(currentdebugevent.dwDebugEventCode);
     end;
 
     eventtext:=format('pid:%x tid:%x - %s (eip:%x)',[currentdebugEvent.dwProcessId, currentdebugevent.dwThreadId, eventtext, TDebuggerthread(debuggerthread).currentThread.context^.{$ifdef cpu64}Rip{$else}eip{$endif}]);

@@ -1,3 +1,6 @@
+// Copyright Cheat Engine. All Rights Reserved.
+
+
 unit CEFuncProc;
 
 {$MODE Delphi}
@@ -411,6 +414,8 @@ resourcestring
   rsCEFPDllInjectionFailedSymbolLookupError = 'Dll injection failed: symbol lookup error';
   rsCEFPICantGetTheProcessListYouArePropablyUseinWindowsNtEtc = 'I can''t get the process list. You are propably using windows NT. Use the window list instead!';
   rsPosition = ' Position';
+  rsThisCanTakeSomeTime = 'This can take some time if you are missing the '
+    +'PDB''s and CE will look frozen. Are you sure?';
 
 function ProcessID: dword;
 begin
@@ -786,7 +791,8 @@ end;
 {$ifdef darwin}
 Procedure InjectDll(dllname: string; functiontocall: string='');
 var s: tstringlist;
-    allocs: TCEAllocArray;
+    di: TDisableInfo;
+    //allocs: TCEAllocArray;
     injector: qword;
     returnvalue: qword;
     i: integer;
@@ -799,7 +805,7 @@ var s: tstringlist;
 
     errorstring: string;
     tid: dword;
-    el: TCEExceptionListArray;
+    //el: TCEExceptionListArray;
 begin
   outputdebugstring('cefuncproc.InjectDLL('''+dllname+''','''+functiontocall+''')');
   s:=tstringlist.create;
@@ -932,20 +938,21 @@ begin
  // raise exception.create('copy to clipboard now');
 
 
-  setlength(allocs,0);
-  if autoassemble(s,false, true, false, false, allocs,el) then
+  di:=TDisableInfo.create;
+  //setlength(allocs,0);
+  if autoassemble(s,false, true, false, false, di) then
   begin
     injector:=0;
     returnvalue:=0;
-    for i:=0 to length(allocs)-1 do
-      if allocs[i].varname='injector' then
-        injector:=allocs[i].address
+    for i:=0 to length(di.allocs)-1 do
+      if di.allocs[i].varname='injector' then
+        injector:=di.allocs[i].address
       else
-      if allocs[i].varname='returnvalue' then
-        returnvalue:=allocs[i].address
+      if di.allocs[i].varname='returnvalue' then
+        returnvalue:=di.allocs[i].address
       else
-      if allocs[i].varname='errorstr' then
-        erroraddress:=allocs[i].address;
+      if di.allocs[i].varname='errorstr' then
+        erroraddress:=di.allocs[i].address;
 
     //showmessage('injector='+inttohex(injector,8));
 
@@ -978,7 +985,7 @@ begin
 
 
     //finally free the injector
-    autoassemble(s, false, false, false, false, allocs, el);   //disable
+    autoassemble(s, false, false, false, false, di);   //disable
 
     if r=2 then
     begin
@@ -2925,40 +2932,42 @@ begin
 end;
 
 
+var
+  _CPUCOUNT: integer{$ifdef NOTMULTITHREADED}=1{$endif};
 
 function GetCPUCount: integer;
 {
 this function will return how many active cpu cores there are at your disposal
 }
 var
-    PA,SA: DWORD_PTR;
+  PA,SA: DWORD_PTR;
 begin
-
-{$ifdef NOTMULTITHREADED}
-  result:=1;
-  exit;
-{$endif}
-
-  {$IFDEF windows}
-  //get the cpu and system affinity mask, only processmask is used
-  GetProcessAffinityMask(getcurrentprocess,PA,SA);
-
-  result:=getbitcount(pa);
-  //in the future make use of getlogicalprocessorinformation
-
-  if result=0 then result:=1;
-  {$else}
-  result:=cpucount;
-
-  if result=1 then
+  if _CPUCOUNT=0 then
   begin
-    //doubt!
-  {$ifdef darwin}
-    exit(macport.getCPUCount);
-  {$endif}
 
+    {$IFDEF windows}
+    //get the cpu and system affinity mask, only processmask is used
+    GetProcessAffinityMask(getcurrentprocess,PA,SA);
+
+    _CPUCOUNT:=getbitcount(pa);
+    //in the future make use of getlogicalprocessorinformation
+
+    if _CPUCOUNT=0 then _CPUCOUNT:=1;
+    {$else}
+    _CPUCOUNT:=cpucount;
+
+    if result=1 then
+    begin
+      //doubt!
+    {$ifdef darwin}
+      _CPUCOUNT:=macport.getCPUCount;
+    {$endif}
+
+    end;
+    {$ENDIF}
   end;
-  {$ENDIF}
+
+  exit(_CPUCOUNT);
 end;
 
 
@@ -3552,6 +3561,14 @@ begin
   result:=s1;
 end;
 
+
+var
+  StackStartCachePID: dword;
+  StackStartCache: tmap;
+  StackStartCacheCS: TCriticalSection;
+  StackStartCacheKernel32Address: ptruint;
+
+
 function GetStackStart(threadnr: integer=0): ptruint;
 {$IFDEF windows}
 var
@@ -3576,6 +3593,20 @@ var
 {$ENDIF}
 //gets the stack base of the main thread, then checks where the "exitThread" entry is located and uses that -pointersize as the stackbase
 begin
+
+  StackStartCacheCS.enter;
+  try
+    if StackStartCachePID<>processid then
+      StackStartCache.Clear //different pid, clear the old cache
+    else
+      if StackStartCache.GetData(threadnr,result) then exit;
+  finally
+    StackStartCacheCS.leave;
+  end;
+
+  //still here, so not cached
+
+
   result:=0;
 
   {$IFDEF windows}
@@ -3681,6 +3712,19 @@ begin
   end;
   {$ENDIF}
 
+  if result<>0 then
+  begin
+    StackStartCacheCS.enter;
+    try
+      if StackStartCache.HasId(threadnr)=false then
+        StackStartCache.Add(threadnr, result);
+
+      StackStartCachePID:=processid;
+    finally
+      StackStartCacheCS.leave;
+    end;
+  end;
+
 end;
 
 function getDiskFreeFromPath(path: string): int64;
@@ -3742,7 +3786,7 @@ begin
   path:=path+'Cheat Engine Symbols';
 
   ForceDirectory(path);
-  if warn and (messagedlg('This can take some time if you are missing the PDB''s and CE will look frozen. Are you sure?', mtWarning, [mbyes,mbno],0,mbno)<>mryes) then exit;
+  if warn and (messagedlg(rsThisCanTakeSomeTime, mtWarning, [mbyes, mbno], 0, mbno)<>mryes) then exit;
 
   getmem(shortpath,256);
   GetShortPathName(pchar(path),shortpath,255);
@@ -3762,6 +3806,10 @@ begin
 end;
 
 initialization
+  StackStartCache:=tmap.Create(itu4,sizeof(ptruint));
+  StackStartCachePID:=0;
+  StackStartCacheCS:=TCriticalSection.Create;
+
 
   if not assigned(OpenProcess) then
   begin

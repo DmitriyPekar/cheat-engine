@@ -31,7 +31,7 @@ procedure initcetitle;
 
 
 
-const beta=' beta 1'; //empty this for a release
+const beta=' beta 3.0.1'; //empty this for a release
 
 var
   CEnorm:string;
@@ -819,6 +819,29 @@ begin
 
           if reg.ValueExists('Use Kernel Debugger') then
             cbKdebug.checked:=reg.ReadBool('Use Kernel Debugger');
+
+          if reg.ValueExists('Use DBVM Debugger') then
+            cbUseDBVMDebugger.checked:=reg.ReadBool('Use DBVM Debugger');
+
+          if reg.ValueExists('DBVMBP Trigger COW') then
+            dbvmbp_options.TriggerCOW:=reg.ReadBool('DBVMBP Trigger COW')
+          else
+            dbvmbp_options.TriggerCOW:=true;
+
+          if reg.ValueExists('DBVMBP This Process Only') then
+            dbvmbp_options.TargetedProcessOnly:=reg.ReadBool('DBVMBP This Process Only');
+
+          if reg.ValueExists('DBVMBP Kernelmode') then
+            dbvmbp_options.KernelmodeBreaks:=reg.readBool('DBVMBP Kernelmode')
+          else
+            dbvmbp_options.KernelmodeBreaks:=true;
+
+
+
+          cbDBVMDebugTriggerCOW.checked:=dbvmbp_options.TriggerCOW;
+          cbDBVMDebugTargetedProcessOnly.checked:=dbvmbp_options.TargetedProcessOnly;
+          cbDBVMDebugKernelmodeBreaks.checked:=dbvmbp_options.KernelmodeBreaks;
+
           {$endif}
 
           if reg.ValueExists('Wait After Gui Update') then
@@ -1072,7 +1095,8 @@ begin
   {$ifdef net}
   MemoryBrowser.Kerneltools1.visible:=false;
   {$else}
-  MemoryBrowser.Kerneltools1.Enabled:={$ifdef windows}DBKLoaded{$else}false{$endif};
+  MemoryBrowser.Kerneltools1.Enabled:={$ifdef windows}DBKLoaded or isRunningDBVM{$else}false{$endif};
+  MemoryBrowser.miCR3Switcher.visible:=MemoryBrowser.Kerneltools1.Enabled;
   {$endif}
 
 

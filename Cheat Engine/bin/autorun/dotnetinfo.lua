@@ -989,10 +989,14 @@ public class patched<classname> : <classname>
 local references, sysfile=dotnetpatch_getAllReferences() --you're free to build your own list
 local csfile,msg=compileCS(csharpscript, references, sysfile)
 
-if csfile==nil then 
-  if msg==nil then msg=' (?Unknown error?)' end
-  messageDialog('Compilation error:'..msg, mtError, mbOK) --show compile error in a dialog instead of a lua error only
-  error(msg)
+if csfile==nil then
+  --sometimes having the sysfile causes an issue. Try without  
+  csfile,msg=compileCS(csharpscript, references)
+  if csfile==nil then 
+    if msg==nil then msg=' (?Unknown error?)' end
+    messageDialog('Compilation error:'..msg, mtError, mbOK) --show compile error in a dialog instead of a lua error only
+    error(msg)
+  end
 end
 
 --still here, c# dll created, now inject and hook
@@ -1015,7 +1019,7 @@ end
 if syntaxcheck then return end
 
 if dotnetdetours['<fullnameDotFormat>'] then
-  autoassemble(dotnetdetours['<fullnameDotFormat>'].disablescript, dotnetdetours['<fullnameDotFormat>'].disableinfo) 
+  autoAssemble(dotnetdetours['<fullnameDotFormat>'].disablescript, dotnetdetours['<fullnameDotFormat>'].disableinfo) 
 end
 {$asm}
 ]]
@@ -1125,7 +1129,48 @@ old]]..methodname..'('..varstring..[[);
   script=ParseScriptTokens(script,tokens)
 
   createAutoAssemblerForm(script)
+end
+
+local function SpawnInjectMethodDialog(frmDotNetInfo)
+  local Class=frmDotNetInfo.CurrentlyDisplayedClass
+  if Class==nil then return end
   
+  local Method=Class.Methods[frmDotNetInfo.lvMethods.ItemIndex+1]
+  if Method==nil then return end
+ 
+  if (Method.Class.Image.Domain.Control~=CONTROL_MONO) then
+    if dotnetpipe==nil then    
+      if messageDialog("Inject the CE .NET interface into the target process?", mtConfirmation,mbYes,mbNo)~=mrYes then
+        return nil,'User declined injection'
+      else    
+        if LaunchDotNetInterface()~=true then
+          return nil,'DotNetInterface did not load'
+        end
+      end    
+    end
+    
+    local moduleid=dotnet_getModuleID(Class.Image.FileName)
+    local methodtoken=Method.Handle
+    local address=getAddressSafe(frmDotNetInfo.comboFieldBaseAddress.Text)
+    local wrappedAddress=dotnet_wrapobject(address)
+    local newaddress=readPointer(wrappedAddress)
+    if newaddress~=address then --wrapping sometimes changes the original address
+      frmDotNetInfo.comboFieldBaseAddress.Text=string.format("%.8x",newaddress)
+    end
+    
+    
+    local mifinfo=dotnet_invoke_method_dialog(Class.Name..'.'..Method.Name, moduleid, methodtoken, wrappedAddress)
+    
+    --also unwrap this address when done with it
+    local od=mifinfo.mif.onDestroy   --save the old ondestroy 
+    mifinfo.mif.onDestroy=function(sender)
+      dotnet_unwrapobject(wrappedAddress)    
+      od(sender) --call the old ondestroy
+    end
+  else
+    --use the already existing mono way
+    mono_invoke_method_dialog(Domain.DomainHandle, Method.Handle, getAddressSafe(frmDotNetInfo.comboFieldBaseAddress.Text)) 
+  end
   
   
 end
@@ -1933,7 +1978,7 @@ function miDotNetInfoClick(sender)
   
   frmDotNetInfo.miJitMethod.Default=true
   frmDotNetInfo.miJitMethod.OnClick=function() OpenAddressOfSelectedMethod(frmDotNetInfo) end
-  
+  frmDotNetInfo.miInvokeMethod.OnClick=function() SpawnInjectMethodDialog(frmDotNetInfo) end
   frmDotNetInfo.miGeneratePatchTemplateForMethod.OnClick=function() GeneratePatchTemplateForMethod(frmDotNetInfo) end
   
   
@@ -1949,8 +1994,13 @@ function miDotNetInfoClick(sender)
   frmDotNetInfo.miBrowseField.OnClick=function(sender) miBrowseFieldClick(frmDotNetInfo, sender) end
   
   frmDotNetInfo.pmFields.OnPopup=function(sender)
-    frmDotNetInfo.miBrowseField.Visible=frmDotNetInfo.lvFields.Selected and frmDotNetInfo.comboFieldBaseAddress.Text~=''
+    frmDotNetInfo.miBrowseField.Enabled=frmDotNetInfo.lvFields.Selected and frmDotNetInfo.comboFieldBaseAddress.Text~=''    
   end
+  
+  frmDotNetInfo.pmMethods.OnPopup=function(sender)
+    frmDotNetInfo.miInvokeMethod.Enabled=(frmDotNetInfo.comboFieldBaseAddress.Text~='') and (getAddressSafe(frmDotNetInfo.comboFieldBaseAddress.Text)~=nil)
+  end
+  
   --Init
   
   

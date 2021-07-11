@@ -131,6 +131,7 @@ type
     structureList: TStringList;
 
     amodulebase: pointer;
+    lastAliveCheck: qword;
 
     {$ifdef darwin}
 
@@ -371,6 +372,8 @@ type
     procedure GetSymbolLists(list: TList);
 
     procedure NotifyFinishedLoadingSymbols; //go through the list of functions to call when the symbollist has finished loading
+    function getMainSymbolList: TSymbolListHandler;
+
     constructor create;
     destructor destroy; override;
 end;
@@ -1954,6 +1957,7 @@ begin
   {$ifdef windows}
   hasmodulespecifier:=false;
   getmem(pSymInfo,sizeof(TSYMBOL_INFO)+100);
+  modulename:='';
 
 
 
@@ -2094,6 +2098,9 @@ var
 
   SearchResult: ptruint;
 
+  b: byte;
+  ar: size_t;
+
   {$ifdef darwin}
   sym: CSSymbolRef;
   symname: pchar;
@@ -2101,6 +2108,14 @@ var
   {$endif}
 begin
 //  sleep(5000);
+
+  if (targetself=false) and (amodulebase<>nil) and (gettickcount64>lastAliveCheck+1000) then
+  begin
+    if ReadProcessMemory(processhandle, amodulebase, @b,1,ar)=false then
+      terminate;
+
+    lastAliveCheck:=GetTickCount64;
+  end;
 
   if symbolloaderthreadeventqueue.count>0 then
   begin
@@ -2813,6 +2828,7 @@ begin
     //OutputDebugString('Symbol loader thread has finished without errors');
   except
     outputdebugstring(rsSymbolloaderthreadHasCrashed);
+    OutputDebugString('at part '+inttostr(debugpart));
   end;
 
   isloading:=false;
@@ -3935,7 +3951,7 @@ begin
       modulelistMREW.endread;
     end;
 
-    if moduleidstring='' then
+    //if moduleidstring='' then
     begin
       symbolloadervalid.Beginread;
       try
@@ -3956,11 +3972,14 @@ begin
       finally
         symbolloadervalid.endread;
       end;
-
     end;
 
 
-    if moduleidstring='' then exit;
+    if moduleidstring='' then
+    begin
+      symbolloaderthread.getStructureList(list);
+      exit(1);
+    end;
     if OpenDataBaseIfNeeded=false then exit;
 
     {$IFDEF windows}
@@ -3991,6 +4010,12 @@ begin
     end;
     {$ENDIF}
 
+
+    if list.count=0 then
+    begin
+      symbolloaderthread.getStructureList(list);
+      result:=1; //not a structinfo
+    end;
   end
   else
   begin
@@ -5874,6 +5899,10 @@ begin
       SymbolsLoadedNotification[i](self);
 end;
 
+function TSymhandler.getMainSymbolList: TSymbolListHandler;
+begin
+  exit(symbollist);
+end;
 
 destructor TSymhandler.destroy;
 begin

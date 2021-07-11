@@ -11,7 +11,7 @@ uses
   windows,
   {$endif}
   LCLIntf, Messages, SysUtils, Classes, Graphics, Controls, Forms, Dialogs,
-  StdCtrls, ExtCtrls, Menus, MemoryRecordUnit, commonTypeDefs, customtypehandler,
+  StdCtrls, ExtCtrls, Menus, MemoryRecordUnit, commonTypeDefs, CustomTypeHandler,
   disassembler, symbolhandler, symbolhandlerstructs, SynEdit, SynHighlighterCpp,
   SynHighlighterAA, LuaSyntax, SynPluginMultiCaret, SynEditSearch, tablist,
   SynGutterBase, SynEditMarks, math, SynEditMiscClasses, SynEditTextBase,
@@ -405,7 +405,7 @@ uses frmAAEditPrefsUnit,MainUnit,memorybrowserformunit,APIhooktemplatesettingsfr
   Globals, Parsers, MemoryQuery, {$ifdef windows}GnuAssembler,{$endif} LuaCaller, SynEditTypes, CEFuncProc,
   StrUtils, types, ComCtrls, LResources, NewKernelHandler, MainUnit2, Assemblerunit,
   autoassembler,  registry, luahandler, memscan, foundlisthelper, ProcessHandlerUnit,
-  frmLuaEngineUnit, frmSyntaxHighlighterEditor, lua, lualib, lauxlib, luaclass, LuaForm, SymbolListHandler;
+  frmLuaEngineUnit, frmSyntaxHighlighterEditor, lua, lualib, lauxlib, LuaClass, LuaForm, SymbolListHandler;
 
 resourcestring
   rsExecuteScript = 'Execute script';
@@ -439,6 +439,16 @@ resourcestring
   rsEverythingOk = 'Everything ok';
   rsRenameTab = 'Rename tab';
   rsNewNameQuestion = 'What should the new name be?';
+  rsDescribeThatThisCodeWillDisableTheScript = 'code from here till the end of the code will be used to disable the cheat';
+  rsDescribeThatThisCodeWillEnableTheScript = 'code from here to ''[DISABLE]'' will be used to enable the cheat';
+  rsAADescribeAllocatedMemory = 'this is allocated memory, you have read,write'
+    +',execute access';
+  rsPlaceYourCodeHere = 'place your code here';
+  rsAAAOBTemplate_Game = 'Game';
+  rsAAAOBTemplate_Version = 'Version';
+  rsAAAOBTemplate_Date = 'Date';
+  rsAAAOBTemplate_Author = 'Author';
+  rsAAAOBTemplate_blabla = 'This script does blah blah blah';
 
 var
   AutoAssemblerTemplates: TAutoAssemblerTemplates;
@@ -713,12 +723,12 @@ begin
           begin
             sl:=tstringlist.create;
             disableinfo.ccodesymbols.GetSymbolList(sl);
-            if MessageDlg('The following C-Code symbols where registered:'+sl.text+#13#10+'Do you wish to keep these?',mtConfirmation, [mbyes,mbno],0)<>mryes then
-              freeandnil(disableinfo.ccodesymbols)
-            else
+            if MessageDlg('The following C-Code symbols where registered:'+sl.text+#13#10+'Do you wish to keep these?',mtConfirmation, [mbyes,mbno],0)=mryes then
             begin
               disableinfo.ccodesymbols.refcount:=0;
-              disableinfo.donotfreeccodesymbols:=true; //has to be manually deleted
+              disableinfo.donotfreeccodedata:=true; //has to be manually deleted
+
+              //the sourcecode lines will stay. You've lost the ability to free this code anyhow
             end;
 
             sl.free;
@@ -1033,8 +1043,8 @@ begin
       add('label(originalcode'+inttostr(injectnr)+')');
       add('label(exit'+inttostr(injectnr)+')');
       add('');
-      add('newmem'+inttostr(injectnr)+': //this is allocated memory, you have read,write,execute access');
-      add('//place your code here');
+      add('newmem'+inttostr(injectnr)+': //'+rsAADescribeAllocatedMemory);
+      add('//'+rsPlaceYourCodeHere);
 
       add('');
       add('originalcode'+inttostr(injectnr)+':');
@@ -1140,7 +1150,7 @@ begin
   if e=-1 then //-2 is 2 or more, so bugged, and >=0 is has one
   begin
     assemblescreen.Lines.Insert(0,'[ENABLE]');
-    assemblescreen.Lines.Insert(1,'//code from here to ''[DISABLE]'' will be used to enable the cheat');
+    assemblescreen.Lines.Insert(1, '//'+rsDescribeThatThisCodeWillEnableTheScript);
     assemblescreen.Lines.Insert(2,'');
   end;
 
@@ -1149,7 +1159,7 @@ begin
     assemblescreen.Lines.Add(' ');
     assemblescreen.Lines.Add(' ');
     assemblescreen.Lines.Add('[DISABLE]');
-    assemblescreen.Lines.Add('//code from here till the end of the code will be used to disable the cheat');
+    assemblescreen.Lines.Add('//'+rsDescribeThatThisCodeWillDisableTheScript);
   end;
 {$endif}
 end;
@@ -2367,6 +2377,10 @@ begin
   miFind.ShortCut:=TextToShortCut('Meta+F');
   mifindNext.ShortCutKey2:=TextToShortcut('Meta+G');
 
+  miNewWindow.Shortcut:=TextToShortCut('Meta+N');
+  load1.Shortcut:=TextToShortCut('Meta+O');
+  save1.Shortcut:=TextToShortCut('Meta+S');
+
   i:=assemblescreen.Keystrokes.FindCommand(ecSelectAll);
   if i<>-1 then assemblescreen.Keystrokes[i].ShortCut:=TextToShortCut('Meta+A');
 {$endif}
@@ -3107,6 +3121,7 @@ var
 begin
   frmHighlighterEditor:=TfrmHighlighterEditor.create(self);
   CPPHighlighter.loadFromRegistryDefault(HKEY_CURRENT_USER, '\Software\Cheat Engine\CPP Highlighter'+darkmodestring);
+
   frmHighlighterEditor.highlighter:=CPPHighlighter;
   if frmHighlighterEditor.showmodal=mrok then
   begin
@@ -3306,12 +3321,12 @@ begin
       script.Add(disablecode[i]);
 
     // add template comment at the beginning
-    script.Insert(0,'{ Game   : ' + copy(mainform.ProcessLabel.Caption, pos('-', mainform.ProcessLabel.Caption) + 1, length(mainform.ProcessLabel.Caption)));
-    script.Insert(1,'  Version: ');
-    script.Insert(2,'  Date   : ' + FormatDateTime('YYYY-MM-DD', Now));
-    script.Insert(3,'  Author : ' + UserName);
+    script.Insert(0, '{ '+rsAAAOBTemplate_Game+'   : ' + copy(mainform.ProcessLabel.Caption, pos('-', mainform.ProcessLabel.Caption) + 1, length(mainform.ProcessLabel.Caption)));
+    script.Insert(1, '  '+rsAAAOBTemplate_Version+': ');
+    script.Insert(2, '  '+rsAAAOBTemplate_Date+'   : ' + FormatDateTime('YYYY-MM-DD', Now));
+    script.Insert(3, '  '+rsAAAOBTemplate_Author+' : ' + UserName);
     script.Insert(4,'');
-    script.Insert(5,'  This script does blah blah blah');
+    script.Insert(5, '  '+rsAAAOBTemplate_blabla);
     script.Insert(6,'}');
     script.Insert(7,'');
 

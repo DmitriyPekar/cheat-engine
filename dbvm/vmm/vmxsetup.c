@@ -23,14 +23,51 @@
 #include "common.h"
 
 
-criticalSection setupVMX_lock;
+criticalSection setupVMX_lock={.name="setupVMX_lock", .debuglevel=2};
 
 volatile unsigned char *MSRBitmap;
 volatile unsigned char *IOBitmap;
 
+volatile unsigned char *VMREADBitmap;
+volatile unsigned char *VMWRITEBitmap;
+
+
 int hasEPTsupport=0;
 int TSCHooked=0;
 int hasNPsupport=1;
+
+
+int canToggleCR3Exit=0; //intel only flag
+
+
+#ifdef USENMIFORWAIT
+int canExitOnNMI=0;
+#endif
+
+int hasMTRRsupport;
+MTRRCAP MTRRCapabilities;
+MTRRDEF MTRRDefType;
+
+int has_EPT_1GBsupport;
+int has_EPT_2MBSupport;
+int has_EPT_ExecuteOnlySupport;
+int has_EPT_INVEPTSingleContext;
+int has_EPT_INVEPTAllContext;
+
+int hasUnrestrictedSupport;
+int hasVPIDSupport;
+int canToggleCR3Exit;
+int hasVMCSShadowingSupport;
+
+int has_VPID_INVVPIDIndividualAddress;
+int has_VPID_INVVPIDSingleContext;
+int has_VPID_INVVPIDAllContext;
+int has_VPID_INVVPIDSingleContextRetainingGlobals;
+
+//AMD
+int has_NP_1GBsupport;
+int has_NP_2MBsupport;
+
 
 
 extern void realmode_inthooks();
@@ -177,7 +214,7 @@ void setupVMX_AMD(pcpuinfo currentcpuinfo)
   currentcpuinfo->vmcb->InterceptVMMCALL=1;
   currentcpuinfo->vmcb->MSR_PROT=1; //some msr's need to be protected
 
-  currentcpuinfo->vmcb->InterceptExceptions=1;// | (1<<3);// | (1<<14); //intercept int1, 3 and 14
+  currentcpuinfo->vmcb->InterceptExceptions=(1<<1) | (1<<3);// | (1<<14); //intercept int1, 3 and 14
  // currentcpuinfo->vmcb->InterceptDR0_15Write=(1<<6); //dr6 so I can see what changed
 
 
@@ -679,12 +716,12 @@ int vmx_addSingleSteppingReason(pcpuinfo currentcpuinfo, int reason, int ID)
 int vmx_enableSingleStepMode(void)
 {
   pcpuinfo c=getcpuinfo();
-  sendstringf("%d Enabling single step mode\n", c->cpunr);
+  //sendstringf("%d Enabling single step mode\n", c->cpunr);
 
 
   if (isAMD)
   {
-    sendstringf("%d CS:RIP=%x:%6 RCX=%d\n", c->cpunr, c->vmcb->cs_selector, c->vmcb->RIP);
+   // sendstringf("%d CS:RIP=%x:%6 RCX=%d\n", c->cpunr, c->vmcb->cs_selector, c->vmcb->RIP);
 
     //break on external interrupts and exceptions
     c->vmcb->InterceptVINTR=1;
@@ -701,6 +738,10 @@ int vmx_enableSingleStepMode(void)
 
     RFLAGS v;
     v.value=c->vmcb->RFLAGS;
+
+    if (c->singleStepping.ReasonsPos==0) //first one
+      c->singleStepping.PreviousTFState=v.TF;
+
     v.TF=1; //single step mode
     v.RF=1;
     if (v.IF)
@@ -710,6 +751,18 @@ int vmx_enableSingleStepMode(void)
 
     c->vmcb->RFLAGS=v.value;
     c->singleStepping.Method=3; //Trap flag
+
+    //turn of syscall, and when syscall is executed, capture the UD, re-enable it, but change the flags mask to keep the TF enabled, and the step after that adjust R11 so that the TF is gone and restore the flags mask.  Then continue as usual;
+    if (c->singleStepping.ReasonsPos==0)
+    {
+      c->singleStepping.PreviousEFER=c->vmcb->EFER;
+      c->singleStepping.PreviousFMASK=c->vmcb->SFMASK;
+      c->singleStepping.LastInstructionWasSyscall=0;
+
+      c->vmcb->EFER&=0xfffffffffffffffeULL;
+      c->vmcb->VMCB_CLEAN_BITS&=~(1<< 5); //efer got changed
+    }
+
 
     return 1;
 
@@ -757,17 +810,24 @@ int vmx_disableSingleStepMode(void)
   if (isAMD)
   {
     //shouldn't be needed but do it anyhow
+
+    sendstringf("%d RFLAGS was %x\n", c->cpunr, c->vmcb->RFLAGS);
+
+
     RFLAGS v;
     v.value=c->vmcb->RFLAGS;
-    v.TF=0; //single step mode
-    //todo: intercept pushf/popf/iret
+    v.TF=c->singleStepping.PreviousTFState;  // 0; //single step mode
 
     c->vmcb->RFLAGS=v.value;
+    sendstringf("%d RFLAGS is %x\n", c->cpunr, c->vmcb->RFLAGS);
+
+
+
     c->singleStepping.Method=0;
 
     c->vmcb->InterceptVINTR=0;
     c->vmcb->InterceptINTR=0;
-    c->vmcb->InterceptExceptions=0; //todo: load current exceptions hooks
+    c->vmcb->InterceptExceptions=(1<<1) | (1<<3); // todo: load current exceptions hooks
 
 
     //mark the intercepts as changed
@@ -775,6 +835,12 @@ int vmx_disableSingleStepMode(void)
     c->vmcb->VMCB_CLEAN_BITS&=~(1<<0);
     c->vmcb->VMCB_CLEAN_BITS=0;
     sendstringf("a c->vmcb->VMCB_CLEAN_BITS=%6\n",c->vmcb->VMCB_CLEAN_BITS);
+
+    c->vmcb->EFER=c->singleStepping.PreviousEFER;
+    c->vmcb->SFMASK=c->singleStepping.PreviousFMASK;
+    c->singleStepping.LastInstructionWasSyscall=0;
+
+    c->vmcb->VMCB_CLEAN_BITS&=~(1<< 5); //efer
 
     return 1;
   }
@@ -810,8 +876,25 @@ int setupEPT(pcpuinfo currentcpuinfo)
   {
     //secondary procbased controls
     QWORD IA32_VMX_SECONDARY_PROCBASED_CTLS=readMSR(IA32_VMX_PROCBASED_CTLS2_MSR); //allowed1/allowed0
+    DWORD old_vm_execution_controls_cpu=vmread(vm_execution_controls_cpu);
+    DWORD new_vm_execution_controls_cpu=old_vm_execution_controls_cpu | SECONDARY_EXECUTION_CONTROLS;
 
-    vmwrite(vm_execution_controls_cpu, vmread(vm_execution_controls_cpu) | SECONDARY_EXECUTION_CONTROLS); //activate secondary controls
+    sendstringf("old_vm_execution_controls_cpu=%x  Want to set it to %6\n",old_vm_execution_controls_cpu, new_vm_execution_controls_cpu);
+    vmwrite(vm_execution_controls_cpu, new_vm_execution_controls_cpu); //activate secondary controls
+
+
+    DWORD current_vm_execution_controls_cpu=vmread(vm_execution_controls_cpu);
+    sendstringf("new_vm_execution_controls_cpu=%x\n",current_vm_execution_controls_cpu);
+
+
+
+
+    if (current_vm_execution_controls_cpu != new_vm_execution_controls_cpu)
+    {
+      sendstringf("Meh...\n");
+      while(1);
+    }
+
 
 
 
@@ -851,15 +934,23 @@ int setupEPT(pcpuinfo currentcpuinfo)
 
       sendstringf("pml4map is at %6\n", pml4mapPA);
 
-      QWORD eptp=pml4mapPA;
-      PEPTP x=(PEPTP)&eptp;
-      x->PAGEWALKLENGTH=3;
-      x->MEMTYPE=0;
-
-      vmwrite(vm_eptpointer, eptp);  //and set the EPTP field
 
       TIA32_VMX_VPID_EPT_CAP eptinfo;
       eptinfo.IA32_VMX_VPID_EPT_CAP=readMSR(IA32_VMX_EPT_VPID_CAP_MSR);
+
+      QWORD eptp=pml4mapPA;
+      PEPTP x=(PEPTP)&eptp;
+      x->PAGEWALKLENGTH=3;
+
+      if (eptinfo.EPT_writeBackSupport)
+        x->MEMTYPE=6;
+      else
+        x->MEMTYPE=0;
+
+
+      vmwrite(vm_eptpointer, eptp);  //and set the EPTP field
+
+
       has_EPT_1GBsupport=eptinfo.EPT_1GBSupport;
       has_EPT_2MBSupport=eptinfo.EPT_2MBSupport;
       has_EPT_ExecuteOnlySupport=eptinfo.EPT_executeOnlySupport;
@@ -997,6 +1088,12 @@ void setup8086WaitForSIPI(pcpuinfo currentcpuinfo, int setupvmcontrols)
       {
         sendstringf("Enabling INVPCID\n");
         secondarycpu|=SPBEF_ENABLE_INVPCID;
+      }
+
+      if ((IA32_VMX_SECONDARY_PROCBASED_CTLS >> 32) & SPBEF_USER_WAIT_AND_PAUSE) //can it enable XSAVES ?
+      {
+        sendstringf("Enabling xsaves\n");
+        secondarycpu|=SPBEF_USER_WAIT_AND_PAUSE;
       }
 
       vmwrite(vm_execution_controls_cpu_secondary, secondarycpu);
@@ -1375,6 +1472,11 @@ void setupVMX(pcpuinfo currentcpuinfo)
 
   csEnter(&setupVMX_lock);
 
+  char *eptcsname=malloc(32);
+  snprintf(eptcsname,64,"EPTPML4CS %d", currentcpuinfo->cpunr);
+
+  currentcpuinfo->EPTPML4CS.name=eptcsname;
+
 
 //  currentcpuinfo->AvailableVirtualAddress=(UINT64)(currentcpuinfo->cpunr+16) << 28;
 
@@ -1710,8 +1812,59 @@ void setupVMX(pcpuinfo currentcpuinfo)
 
 
       //needs less interrupt hooks
-      vmwrite(vm_exception_bitmap,(1<<1) | (1<<3));
+#ifdef USENMIFORWAIT      
+      vmwrite(vm_exception_bitmap,  (1<<1) | (1<<2) | (1<<3)); //int1 bp, int3 bp
+#else
+      vmwrite(vm_exception_bitmap,  (1<<1) | (1<<3)); //int1 bp, int3 bp
+#endif
 
+      //todo: check if it can do with less cr3 exits  (can turn that on at runtime)
+      //check the primary procbased capabilities if it can be set to 0
+
+      sendstringf("Checking if it supports CR3 access exit to 0\n");
+
+
+      QWORD procbasedcapabilities;
+      if (readMSR(IA32_VMX_BASIC_MSR) & ((QWORD)1<<55))
+        procbasedcapabilities=readMSR(IA32_VMX_TRUE_PROCBASED_CTLS_MSR);
+      else
+        procbasedcapabilities=readMSR(IA32_VMX_PROCBASED_CTLS_MSR);
+
+      sendstringf("procbasedcapabilities=%6\n", procbasedcapabilities);
+
+      canToggleCR3Exit=((procbasedcapabilities & (PPBEF_CR3LOAD_EXITING | PPBEF_CR3STORE_EXITING))==0); //0 means it can be set to 0
+
+      sendstringf("canToggleCR3Exit=%d\n", canToggleCR3Exit);
+
+      if (canToggleCR3Exit) //turn of cr3 exits
+        IA32_VMX_PROCBASED_CTLS = IA32_VMX_PROCBASED_CTLS & (QWORD)(~(PPBEF_CR3LOAD_EXITING | PPBEF_CR3STORE_EXITING));
+
+
+      if ((IA32_VMX_SECONDARY_PROCBASED_CTLS>>32) & SPBEF_ENABLE_VMCS_SHADOWING )
+      {
+        sendstringf("Supports VMCS shadowing\n");
+        vmwrite(vm_execution_controls_cpu_secondary, vmread(vm_execution_controls_cpu_secondary) | SPBEF_ENABLE_VMCS_SHADOWING);
+        hasVMCSShadowingSupport=1;
+
+        if (VMREADBitmap==NULL)
+        {
+          VMREADBitmap=malloc2(4096);
+          VMWRITEBitmap=malloc2(4096);
+
+          //corresponding VMREAD bit is in bit position x & 7 of the byte at physical address addr | (x » 3).
+          zeromemory(VMREADBitmap, 4096);
+          zeromemory(VMWRITEBitmap, 4096);
+
+
+          //example: VMREADBitmap[0x800 >> 3]|=(1 << (0x800 & 7));
+
+
+        }
+
+        vmwrite(vm_vmread_bitmap_address, VirtualToPhysical(VMREADBitmap));
+        vmwrite(vm_vmwrite_bitmap_address, VirtualToPhysical(VMWRITEBitmap));
+
+      }
     }
     else
     {
@@ -1719,6 +1872,14 @@ void setupVMX(pcpuinfo currentcpuinfo)
       hasUnrestrictedSupport=0;
     }
   }
+
+
+#ifdef USENMIFORWAIT
+  canExitOnNMI=vmx_enablePinBasedFeature(PINBEF_NMI_EXITING);
+#endif
+
+  //vmx_enablePinBasedFeature(EXTERNAL_INTERRUPT_EXITING);
+
 
 
 
@@ -1822,10 +1983,8 @@ void setupVMX(pcpuinfo currentcpuinfo)
 
         if ((IA32_VMX_SECONDARY_PROCBASED_CTLS >> 32) & SPBEF_ENABLE_RDTSCP) //can it enable rdtscp ?
         {
-//#ifndef TSCHOOK
           sendstringf("Enabling rdtscp\n");
           secondarycpu|=SPBEF_ENABLE_RDTSCP;
-//#endif
         }
 
 
@@ -1892,6 +2051,12 @@ void setupVMX(pcpuinfo currentcpuinfo)
       vmwrite(vm_guest_cr0, (ULONG)IA32_VMX_CR0_FIXED0 | originalstate->cr0);
       vmwrite(vm_guest_cr3, originalstate->cr3);
       vmwrite(vm_guest_cr4, (ULONG)IA32_VMX_CR4_FIXED0 | originalstate->cr4);
+
+      if (vmread(vm_guest_cr0)!=((ULONG)IA32_VMX_CR0_FIXED0 | originalstate->cr0))
+      {
+        sendstringf("vm_guest_cr0 = %6\n", vmread(vm_guest_cr0));
+        while (1);
+      }
 
       vmwrite(vm_guest_gdtr_base, (UINT64)originalstate->gdtbase);
       vmwrite(vm_guest_gdt_limit, (UINT64)originalstate->gdtlimit);
@@ -2239,6 +2404,7 @@ void setupVMX(pcpuinfo currentcpuinfo)
 
         if (lowregion==-1)
         {
+          nosendchar[getAPICID()]=0;
           sendstringf("No low region:\n");
           sendARD();
           ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);

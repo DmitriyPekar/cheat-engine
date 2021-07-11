@@ -24,7 +24,7 @@ uses
    Assemblerunit, classes, LCLIntf,symbolhandler, symbolhandlerstructs,
    sysutils,dialogs,controls, CEFuncProc, NewKernelHandler ,plugin,
    ProcessHandlerUnit, lua, lualib, lauxlib, luaclass, commonTypeDefs, OpenSave,
-   SymbolListHandler,
+   SymbolListHandler, tcclib,
    betterControls;
 
 
@@ -38,7 +38,8 @@ type
     exceptions:TCEExceptionListArray;
     registeredsymbols: tstringlist;
     ccodesymbols: TSymbolListHandler;
-    donotfreeccodesymbols: boolean;
+    sourcecodeinfo: TSourceCodeInfo;
+    donotfreeccodedata: boolean;
 
     allsymbols: tstringlist; //filled at the end with all known symbols (allocs, labels, kallocs, aobscan results, defines that are addresses, etc...)
 
@@ -277,8 +278,11 @@ begin
   setlength(Allocs,0);
   setlength(exceptions,0);
   freeandnil(registeredsymbols);
-  if (ccodesymbols<>nil) and (donotfreeccodesymbols=false) then
+  if (ccodesymbols<>nil) and (donotfreeccodedata=false) then
     freeandnil(ccodesymbols);
+
+  if (sourcecodeinfo<>nil) and (donotfreeccodedata=false) then
+    freeandnil(sourcecodeinfo);
 end;
 
 constructor TDisableInfo.create;
@@ -689,6 +693,7 @@ begin
   for i:=0 to code.count-1 do
   begin
     currentline:=code[i];
+    instring:=false; //ce doesn't do multiline strings
 
     for j:=1 to length(currentline) do
     begin
@@ -710,7 +715,7 @@ begin
       end
       else
       begin
-        if currentline[j]='''' then instring:=not instring;
+        if (currentline[j]='''') then instring:=not instring;
         if currentline[j]=#9 then currentline[j]:=' '; //tabs are basicly comments
 
         if not instring then
@@ -1554,18 +1559,21 @@ begin
   setlength(createthread,0);
   setlength(createthreadandwait,0);
   setlength(defines,0);
+  setlength(labels,0);
 
   currentaddress:=0;
 
 
-  //add all symbols as defines
+  //add all symbols as predefined labels
   if disableinfo<>nil then
   begin
-    setlength(defines,disableinfo.allsymbols.count);
+    setlength(labels, disableinfo.allsymbols.count);
     for i:=0 to disableinfo.allsymbols.count-1 do
     begin
-      defines[i].name:=disableinfo.allsymbols[i];
-      defines[i].whatever:=inttohex(ptruint(disableinfo.allsymbols.Objects[i]),8);
+      labels[i].defined:=true;
+      labels[i].address:=ptruint(disableinfo.allsymbols.Objects[i]);
+      labels[i].labelname:=disableinfo.allsymbols[i];
+      labels[i].assemblerline:=-2; //undo symbol label
     end;
   end;
 
@@ -1604,6 +1612,7 @@ begin
 
 //2 pass scanner
   try
+
     setlength(assembled,1);
     setlength(kallocs,0);
     setlength(allocs,0);
@@ -1628,6 +1637,22 @@ begin
     luacode(code, syntaxcheckonly, memrec); //replaces {$lua}/{$asm} blocks with the output of those functions
     AutoAssemblerCodePass1(code,dataForAACodePass2, syntaxcheckonly, targetself); //replaces the {$luacode} and {$ccode} blocks with a call to extra routines added to the script
     //still here
+
+    //c-symbol addition
+    for i:=0 to length(dataForAACodePass2.cdata.symbols)-1 do
+    begin
+      //define the c-code symbol as an undefined labels
+      j:=length(labels);
+      setlength(labels, j+1);
+      labels[j].labelname:=dataForAACodePass2.cdata.symbols[i].name;
+      labels[j].defined:=false;
+      labels[j].afterccode:=true;
+      labels[j].assemblerline:=-1;
+      setlength(labels[j].references,0);
+      setlength(labels[j].references2,0);
+    end;
+    //c-symbol addition^
+
 
     //one more time getting rid of {$ASM} lines that have been added while they shouldn't be required
     for i:=0 to code.count-1 do
@@ -2216,7 +2241,7 @@ begin
               s1:=trim(copy(currentline,a+1,b-a-1));
 
               try
-                testptr:=symhandler.getAddressFromName(s1);
+                testptr:=getAddressFromScript(s1);
               except
                 raise exception.Create(format(rsXCouldNotBeFound, [s1]));
               end;
@@ -2682,6 +2707,9 @@ begin
           end;
 
 
+
+
+
           try
             //replace identifiers in the line with their address
             ok1:=false;
@@ -2722,40 +2750,7 @@ begin
                 end;
               end;
 
-              //c-symbol addition
-              if not ok1 then
-              begin
-                //last chance, try the c-code symbols
-                for j:=0 to length(dataForAACodePass2.cdata.symbols)-1 do
-                begin
-                  if processhandler.is64bit then
-                    currentline:=replacetoken(currentline,dataForAACodePass2.cdata.symbols[j].name,'ffffffffffffffff')
-                  else
-                    currentline:=replacetoken(currentline,dataForAACodePass2.cdata.symbols[j].name,'00000000');
 
-                  try
-                    ok1:=assemble(currentline,currentaddress,assembled[0].bytes, apNone, true);
-                    if ok1 then
-                    begin
-                      //define this c-code symbol as an undefined label
-                      k:=length(labels);
-                      setlength(labels, k+1);
-                      labels[k].labelname:=dataForAACodePass2.cdata.symbols[j].name;
-                      labels[k].defined:=false;
-                      labels[k].afterccode:=true;
-                      labels[k].assemblerline:=-1;
-                      setlength(labels[k].references,0);
-                      setlength(labels[k].references2,0);
-                      break;
-                    end;
-                  except
-                    //don't quit yet
-                  end;
-
-                end;
-
-              end;
-              //c-symbol addition^
 
             end;
 
@@ -3209,7 +3204,6 @@ begin
         for j:=0 to length(defines)-1 do
           currentline:=replacetoken(currentline,defines[j].name,defines[j].whatever);
 
-
         ok1:=false;
         if currentline[length(currentline)]<>':' then //if it's not a definition then
         begin
@@ -3537,7 +3531,18 @@ begin
           selfsymhandler.AddSymbolList(disableinfo.ccodesymbols)
         else
           symhandler.AddSymbolList(disableinfo.ccodesymbols);
+
+        disableinfo.sourcecodeinfo:=dataForAACodePass2.cdata.sourceCodeInfo;
+
+        if disableinfo.sourcecodeinfo<>nil then
+          disableinfo.sourcecodeinfo.register;
+      end
+      else
+      begin
+        //else do not register the symbols (You can't disable them otherwise)
+        freeandnil(dataForAACodePass2.cdata.sourceCodeInfo);
       end;
+
 
       //reassemble c-code reference
       for j:=0 to length(labels)-1 do
@@ -3742,7 +3747,7 @@ begin
             if ok1=false then //not in the list yet, add it
             begin
               j:=length(dealloc);
-              setlength(dealloc, j-1);
+              setlength(dealloc, j+1);
               dealloc[j]:=disableinfo.allocs[i].address;
             end;
           end;
@@ -3769,6 +3774,8 @@ begin
 
           disableinfo.ccodesymbols.clear;
           disableinfo.ccodesymbols.unregisterList;
+
+          freeandnil(disableinfo.sourcecodeinfo);
         end;
 
         setlength(disableinfo.allocs,length(allocs));

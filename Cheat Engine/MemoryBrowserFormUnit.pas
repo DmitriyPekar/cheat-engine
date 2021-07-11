@@ -6,7 +6,7 @@ interface
 
 uses
   {$ifdef darwin}
-  macport, LCLType,
+  macport, LCLType, macportdefines,
   {$endif}
   {$ifdef windows}
   jwawindows, windows,imagehlp,
@@ -20,7 +20,8 @@ uses
   debughelper, debuggertypedefinitions,frmMemviewPreferencesUnit, registry,
   disassemblerComments, multilineinputqueryunit, frmMemoryViewExUnit,
   LastDisassembleData, ProcessHandlerUnit, commonTypeDefs, binutils,
-  fontSaveLoadRegistry, LazFileUtils, ceregistry, betterControls,ScrollBoxEx;
+  fontSaveLoadRegistry, LazFileUtils, ceregistry, frmCR3SwitcherUnit,
+  betterControls, ScrollBoxEx;
 
 
 type
@@ -48,6 +49,7 @@ type
     GSlabel: TLabel;
     MenuItem4: TMenuItem;
     copyBytesAndOpcodesAndComments: TMenuItem;
+    miCR3Switcher: TMenuItem;
     miShowSectionAddresses: TMenuItem;
     miOpenInDissectData: TMenuItem;
     miCopyOpcodesOnly: TMenuItem;
@@ -69,7 +71,7 @@ type
     MenuItem12: TMenuItem;
     MenuItem13: TMenuItem;
     MenuItem14: TMenuItem;
-    DBVMFindoutwhataddressesthisinstructionaccesses: TMenuItem;
+    miDBVMFindoutwhataddressesthisinstructionaccesses: TMenuItem;
     Showdebugtoolbar1: TMenuItem;
     miCopyAddressesOnly: TMenuItem;
     miHideToolbar: TMenuItem;
@@ -342,7 +344,8 @@ type
     procedure MenuItem11Click(Sender: TObject);
     procedure MenuItem12Click(Sender: TObject);
     procedure MenuItem14Click(Sender: TObject);
-    procedure DBVMFindoutwhataddressesthisinstructionaccessesClick(Sender: TObject);
+    procedure miCR3SwitcherClick(Sender: TObject);
+    procedure miDBVMFindoutwhataddressesthisinstructionaccessesClick(Sender: TObject);
     procedure MenuItem4Click(Sender: TObject);
     procedure miOpenInDissectDataClick(Sender: TObject);
     procedure miShowSectionAddressesClick(Sender: TObject);
@@ -610,6 +613,10 @@ type
     preferedF5BreakpointMethod: TBreakpointMethod;
 
     followRegister: integer;
+
+    fcr3: qword;
+    fcr3switcher: TfrmCR3Switcher;
+    procedure cr3switcherCR3Change(sender: TObject);
     procedure SetStacktraceSize(size: integer);
     procedure setShowDebugPanels(state: boolean);
     function getShowValues: boolean;
@@ -623,6 +630,12 @@ type
     procedure setContextValueByTag(value: ptruint; tag: integer);
     function  getContextValueByTag(tag: integer): ptruint;
     procedure ApplyFollowRegister;
+    procedure setCR3(newcr3: qword);
+    function ReadProcessMemory(hProcess: THandle; lpBaseAddress, lpBuffer: Pointer; nSize: size_t; var lpNumberOfBytesRead: PTRUINT): BOOL;
+
+    procedure setCaption(c: string);
+    function getCaption: string;
+
   public
     { Public declarations }
     FSymbolsLoaded: Boolean;
@@ -675,6 +688,9 @@ type
     procedure miStopDifferenceClick(Sender: TObject);
     procedure Scrollboxscroll(sender: TObject);
     procedure AddToDisassemblerBackList(address: pointer);
+
+    procedure createcr3switcher;
+    property cr3switcher: TfrmCR3Switcher read fcr3switcher;
   published
     //support for old scripts that reference these
     property Run1: TMenuItem read miDebugRun;
@@ -690,6 +706,8 @@ type
     property Symbolhandler1: TMenuItem read miUserdefinedSymbols;
     property AccessedRegisterColor: TColor read faccessedRegisterColor write faccessedRegisterColor;
     property ChangedRegisterColor: TColor read fChangedRegisterColor write fChangedRegisterColor;
+    property CR3: QWORD read fCR3 write setCR3;
+    property Caption: string read getCaption write setCaption;
   end;
 
 var
@@ -723,7 +741,8 @@ uses Valuechange, MainUnit, debugeventhandler, findwindowunit,
   vmxfunctions, frmstructurecompareunit, globals, UnexpectedExceptionsHelper,
   frmExceptionRegionListUnit, frmExceptionIgnoreListUnit, frmcodefilterunit,
   frmDBVMWatchConfigUnit, DBK32functions, DPIHelper, DebuggerInterface,
-  DebuggerInterfaceAPIWrapper, BreakpointTypeDef, CustomTypeHandler;
+  DebuggerInterfaceAPIWrapper, BreakpointTypeDef, CustomTypeHandler,
+  frmSourceDisplayUnit, sourcecodehandler, tcclib;
 
 
 resourcestring
@@ -811,8 +830,16 @@ begin
 end;
 
 procedure TMemoryBrowser.setShowDebugPanels(state: boolean);
+var
+  oldstackwidth: integer;
+  oldpanel3width: integer;
+
+  cw: integer;
+  ew: integer;
 begin
-  if state then
+  oldstackwidth:=pnlStacktrace.Width;
+  oldpanel3width:=panel3.width;
+  {if state then
   begin
     //resizing should change the stack, not the hexview
     panel3.Align:=alLeft;
@@ -826,7 +853,7 @@ begin
     pnlStacktrace.align:=alRight;
     splitter3.Align:=alRight;
     panel3.Align:=alclient;
-  end;
+  end; }
 
   FShowDebugPanels:=state;
   registerview.Visible:=state;
@@ -834,7 +861,7 @@ begin
   splitter2.Visible:=state;
   splitter3.Visible:=state;
 
-
+  pnlStacktrace.width:=oldstackwidth;
 end;
 
 procedure TMemoryBrowser.SetStacktraceSize(size: integer);
@@ -851,7 +878,40 @@ begin
   reloadStacktrace;
 end;
 
+procedure TMemoryBrowser.setCaption(c: string);
+var cr3pos, cr3posend: integer;
+begin
+  cr3pos:=pos(' (CR3 ',c);
+  if (fcr3<>0) and (cr3pos=0) then //add the statement which CR3 this is
+    c:=c+' (CR3 '+inttohex(fcr3,8)+')';
+
+
+  if (fcr3=0) and (cr3pos<>0) then //delete it
+  begin
+    cr3posend:=Pos(')',c,cr3pos+1);
+    if cr3posend>0 then
+      c:=copy(c,1,cr3pos-1)+copy(c,cr3posend+1);
+  end;
+
+  inherited caption:=c;
+end;
+
+function TMemoryBrowser.getCaption: string;
+begin
+  result:=inherited caption;
+end;
+
 //^^^^
+
+
+function TMemoryBrowser.ReadProcessMemory(hProcess: THandle; lpBaseAddress, lpBuffer: Pointer; nSize: size_t; var lpNumberOfBytesRead: PTRUINT): BOOL;
+begin
+  if fcr3=0 then
+    result:={$ifdef windows}newkernelhandler.{$endif}{$ifdef darwin}macport.{$endif}ReadProcessMemory(hProcess, lpBaseAddress, lpBuffer, nsize, lpNumberOfBytesRead)
+  {$ifdef windows}
+  else
+    result:=ReadProcessMemoryCR3(fcr3,lpBaseAddress, lpBuffer, nsize, lpNumberOfBytesRead){$endif};
+end;
 
 
 
@@ -1175,7 +1235,55 @@ begin
   EnableWindowsSymbols(true);
 end;
 
-procedure TMemoryBrowser.DBVMFindoutwhataddressesthisinstructionaccessesClick(Sender: TObject);
+procedure TMemorybrowser.setCR3(newcr3: qword);
+var oldcr3: qword;
+begin
+  oldcr3:=fcr3;
+  if debuggerthread<>nil then debuggerthread.execlocation:=4120;
+
+  fcr3:=newcr3;
+  disassemblerview.cr3:=fcr3;
+  if debuggerthread<>nil then debuggerthread.execlocation:=4121;
+  hexview.cr3:=fcr3;
+  if debuggerthread<>nil then debuggerthread.execlocation:=4122;
+
+  if (newcr3<>oldcr3) then
+  begin
+    if debuggerthread<>nil then debuggerthread.execlocation:=4123;
+    createcr3switcher;
+    if debuggerthread<>nil then debuggerthread.execlocation:=4124;
+    fcr3switcher.addCR3ToList(newcr3);
+    if debuggerthread<>nil then debuggerthread.execlocation:=4125;
+    fcr3switcher.Show;
+    if debuggerthread<>nil then debuggerthread.execlocation:=4126;
+  end;
+
+  caption:=caption;
+end;
+
+procedure TMemoryBrowser.cr3switcherCR3Change(sender: TObject);
+begin
+  //cr3 changed, notify the disassembler and hexview
+  cr3:=cr3switcher.cr3;
+end;
+
+procedure TMemoryBrowser.createcr3switcher;
+begin
+  if fcr3switcher=nil then
+  begin
+    fcr3switcher:=TfrmCR3Switcher.Create(self);
+    fcr3switcher.OnCR3Change:=cr3switcherCR3Change;
+  end;
+end;
+
+procedure TMemoryBrowser.miCR3SwitcherClick(Sender: TObject);
+begin
+  //the cr3 switcher is unique for each memview window
+  createcr3switcher;
+  fcr3switcher.Show;
+end;
+
+procedure TMemoryBrowser.miDBVMFindoutwhataddressesthisinstructionaccessesClick(Sender: TObject);
 begin
   DBVMFindwhatThiscodeAccesses(disassemblerview.SelectedAddress);
 end;
@@ -1267,8 +1375,10 @@ begin
   begin
     VA:=disassemblerview.SelectedAddress;
 
-    if GetPhysicalAddress(processhandle,pointer(VA),int64(PA)) then
-      dbvm_cloak_activate(PA,VA);
+    if GetPhysicalAddress(processhandle,pointer(VA),PA) then
+      dbvm_cloak_activate(PA,VA)
+    else
+      MessageDlg('Failed obtaining the physical address of this memory', mtError, [mbok],0);
   end;
   {$endif}
 end;
@@ -2331,7 +2441,8 @@ begin
 
   reg:=Tregistry.Create;
   try
-    if reg.OpenKey('\Software\Cheat Engine\Disassemblerview '+inttostr(screen.PixelsPerInch)+'\',true) then
+
+    if reg.OpenKey('\Software\Cheat Engine\Disassemblerview '+inttostr(screen.PixelsPerInch)+darkmodestring+'\',true) then
     begin
       reg.{$ifdef windows}WriteBinaryData{$else}WriteString{$endif}('colors', {$ifndef windows}bintohexs({$endif}disassemblerview.colors, sizeof(disassemblerview.colors)){$ifndef windows}){$endif};
 
@@ -2447,6 +2558,8 @@ end;
 procedure TMemoryBrowser.disassemblerviewDblClick(Sender: TObject);
 var m: TPoint;
   a: ptruint;
+  lni: PLineNumberInfo;
+  f: TfrmSourceDisplay;
 begin
   //find what column is clicked
 
@@ -2457,14 +2570,25 @@ begin
   begin
     backlist.Push(pointer(disassemblerview.SelectedAddress));
     disassemblerview.SelectedAddress:=a;
-  end
-  else
-  begin
-    if m.x>(disassemblerview.getheaderWidth(0)+disassemblerview.getheaderWidth(1)+disassemblerview.getheaderWidth(2)) then
-      miUserdefinedComment.click //comment click
-    else
-      assemble1.Click;
+    exit;
   end;
+
+  lni:=disassemblerview.getSourceCodeAtPos(m);
+  if lni<>nil then
+  begin
+    f:=getSourceViewForm(lni);
+    if f<>nil then
+      f.show();
+    exit;
+  end;
+
+  if m.x>(disassemblerview.getheaderWidth(0)+disassemblerview.getheaderWidth(1)+disassemblerview.getheaderWidth(2)) then
+  begin
+    miUserdefinedComment.click; //comment click
+    exit;
+  end;
+
+  assemble1.Click;
 end;
 
 procedure TMemoryBrowser.FormCreate(Sender: TObject);
@@ -2546,7 +2670,7 @@ begin
       disassemblerview.font:=f;
     end;
 
-    if reg.OpenKey('\Software\Cheat Engine\Disassemblerview '+inttostr(screen.PixelsPerInch)+'\',false) then
+    if reg.OpenKey('\Software\Cheat Engine\Disassemblerview '+inttostr(screen.PixelsPerInch)+darkmodestring+'\',false) then
     begin
       if reg.ValueExists('colors') then
       begin
@@ -3058,14 +3182,20 @@ begin
   if(canceled)then
     exit;
 
-  oldAddress:=disassemblerview.SelectedAddress;
   try
-    disassemblerview.SelectedAddress:=symhandler.getaddressfromname(newaddress);
-  except
-    disassemblerview.SelectedAddress:=getaddress(newaddress);
-  end;
+    oldAddress:=disassemblerview.SelectedAddress;
+    try
+      disassemblerview.SelectedAddress:=symhandler.getaddressfromname(newaddress);
+    except
+      disassemblerview.SelectedAddress:=getaddress(newaddress);
+    end;
 
-  backlist.Push(pointer(oldAddress));
+    backlist.Push(pointer(oldAddress));
+
+  except
+    on e:exception do
+      MessageDlg(e.Message,mtError,[mbok],0);
+  end;
 end;
 
 procedure TMemoryBrowser.Search1Click(Sender: TObject);
@@ -3353,10 +3483,19 @@ begin
 
         bytelength:=length(bytes);
 
-        vpe:=(SkipVirtualProtectEx=false) and VirtualProtectEx(processhandle,  pointer(Address),bytelength,PAGE_EXECUTE_READWRITE,p);
-        WriteProcessMemoryWithCloakSupport(processhandle,pointer(Address),@bytes[0],bytelength,a);
-        if vpe then
-          VirtualProtectEx(processhandle,pointer(Address),bytelength,p,p);
+        if fcr3=0 then
+        begin
+          vpe:=(SkipVirtualProtectEx=false) and VirtualProtectEx(processhandle,  pointer(Address),bytelength,PAGE_EXECUTE_READWRITE,p);
+          WriteProcessMemoryWithCloakSupport(processhandle,pointer(Address),@bytes[0],bytelength,a);
+          if vpe then
+            VirtualProtectEx(processhandle,pointer(Address),bytelength,p,p);
+        end
+        else
+        begin
+          {$ifdef windows}
+          WriteProcessMemoryCR3(fcr3, pointer(address),@bytes[0], bytelength,a);
+          {$endif}
+        end;
 
         hexview.update;
         disassemblerview.Update;
@@ -3934,6 +4073,17 @@ begin
   if frmdissectcode=nil then
     frmdissectcode:=tfrmDissectcode.create(self);
 
+  if disassemblerview.SelectedAddress2<>disassemblerview.SelectedAddress then
+  begin
+    frmDissectCode.edtCustomRangeStart.text:=inttohex(MinX(disassemblerview.SelectedAddress, disassemblerview.SelectedAddress2),8);
+    frmDissectCode.edtCustomRangeStop.text:=inttohex(MaxX(disassemblerview.SelectedAddress, disassemblerview.SelectedAddress2),8);
+  end
+  else
+  begin
+    frmDissectCode.edtCustomRangeStart.text:='';
+    frmDissectCode.edtCustomRangeStop.text:='';
+  end;
+
   frmdissectcode.Show;
   {$endif}
 end;
@@ -3976,12 +4126,19 @@ var
   PA: qword;
   bo: integer;
 begin
-  //first check if it's a dbvm changeregonbp bp, and if so, disable it
+  //first check if it's a cloaked dbvm bp, and if so, disable it
   if dbvm_isBreakpoint(disassemblerview.SelectedAddress, PA, BO, b) then
   begin
     if bo=1 then //changeregonbp
     begin
       dbvm_cloak_removechangeregonbp(PA);
+      disassemblerview.Update;
+      exit;
+    end;
+
+    if bo=4 then //break and trace
+    begin
+      dbvm_cloak_traceonbp_remove(PA);
       disassemblerview.Update;
       exit;
     end;
@@ -3997,6 +4154,9 @@ begin
 
       DebuggerThread.ToggleOnExecuteBreakpoint(disassemblerview.SelectedAddress,bpm);
       disassemblerview.Update;
+
+      ApplySourceCodeDebugUpdate;
+
     end;
   except
     on e:exception do MessageDlg(e.message,mtError,[mbok],0);
@@ -4289,10 +4449,10 @@ begin
   miConditionalBreak.visible:=miConditionalBreak.enabled;
 
   miDBVMActivateCloak.visible:={$ifdef windows}isRunningDBVM and hasEPTSupport and (not hasCloakedRegionInRange(disassemblerview.SelectedAddress, 1, VA,PA)){$else}false{$endif};
-  miDBVMActivateCloak.enabled:=miDBVMActivateCloak.visible and DBKLoaded;
+  miDBVMActivateCloak.enabled:=miDBVMActivateCloak.visible;
 
   miDBVMDisableCloak.visible:={$ifdef windows}isRunningDBVM and hasEPTSupport and (hasCloakedRegionInRange(disassemblerview.SelectedAddress, 1, VA,PA)){$else}false{$endif};
-  miDBVMDisableCloak.enabled:=miDBVMDisableCloak.visible and DBKLoaded;
+  miDBVMDisableCloak.enabled:=miDBVMDisableCloak.visible;
 
   miTogglebreakpoint.visible:=(not ischild);
 
@@ -4378,8 +4538,8 @@ begin
 
   miAddToTheCodelist.visible:=not inadvancedoptions;
 
-  DBVMFindoutwhataddressesthisinstructionaccesses.visible:={$ifdef windows}isDBVMCapable and miSetSpecificBreakpoint.visible{$else}false{$endif};
-  DBVMFindoutwhataddressesthisinstructionaccesses.enabled:=DBVMFindoutwhataddressesthisinstructionaccesses.visible and DBKLoaded;
+  miDBVMFindoutwhataddressesthisinstructionaccesses.visible:={$ifdef windows}isDBVMCapable and miSetSpecificBreakpoint.visible{$else}false{$endif};
+  miDBVMFindoutwhataddressesthisinstructionaccesses.enabled:=miDBVMFindoutwhataddressesthisinstructionaccesses.visible;
 
   //
   miSetBreakpointHW.enabled:=(CurrentDebuggerInterface=nil) or (dbcHardwareBreakpoint in CurrentDebuggerInterface.DebuggerCapabilities);
@@ -4512,7 +4672,7 @@ begin
     caption:=caption+'* ('+ns+')';
 
     Kerneltools1.enabled:=memorybrowser.Kerneltools1.enabled;
-
+    miCR3Switcher.visible:=Kerneltools1.Enabled;
     ischild:=true;
     show;
   end;
@@ -4736,32 +4896,32 @@ begin
     s:=disassemble(address2);
 
     //spawn a DBVM watch config screen where the user can select options like lock memory
-    if frmDBVMWatchConfig=nil then
-      frmDBVMWatchConfig:=TfrmDBVMWatchConfig.create(self);
+    if frmDBVMWatchConfigFindWhatCodeAccesses=nil then
+      frmDBVMWatchConfigFindWhatCodeAccesses:=TfrmDBVMExecuteWatchConfig.create(self);
 
-    frmDBVMWatchConfig.address:=address;
-    frmDBVMWatchConfig.rbExecuteAccess.checked:=true;
-    frmDBVMWatchConfig.gbAccessType.visible:=false;
+    frmDBVMWatchConfigFindWhatCodeAccesses.address:=address;
+    frmDBVMWatchConfigFindWhatCodeAccesses.rbExecuteAccess.checked:=true;
+    frmDBVMWatchConfigFindWhatCodeAccesses.gbAccessType.visible:=false;
 
-    frmDBVMWatchConfig.cbMultipleRIP.checked:=true;
-    frmDBVMWatchConfig.cbMultipleRIP.Visible:=false;
-    frmDBVMWatchConfig.cbWholePage.Visible:=false;
+    frmDBVMWatchConfigFindWhatCodeAccesses.cbMultipleRIP.checked:=true;
+    frmDBVMWatchConfigFindWhatCodeAccesses.cbMultipleRIP.Visible:=false;
+    frmDBVMWatchConfigFindWhatCodeAccesses.cbWholePage.Visible:=false;
 
-    if frmDBVMWatchConfig.showmodal=mrok then
+    if frmDBVMWatchConfigFindWhatCodeAccesses.showmodal=mrok then
     begin
-      if frmDBVMWatchConfig.LockPage then
+      if frmDBVMWatchConfigFindWhatCodeAccesses.LockPage then
         unlockaddress:=LockMemory(processid, address and QWORD($fffffffffffff000),4096)
       else
         unlockaddress:=0;
 
-      id:=dbvm_watch_executes(frmDBVMWatchConfig.PhysicalAddress, address2-address, frmDBVMWatchConfig.Options, frmDBVMWatchConfig.MaxEntries);
+      id:=dbvm_watch_executes(frmDBVMWatchConfigFindWhatCodeAccesses.PhysicalAddress, address2-address, frmDBVMWatchConfigFindWhatCodeAccesses.Options, frmDBVMWatchConfigFindWhatCodeAccesses.MaxEntries);
 
       if (id<>-1) then
       begin
         //spawn a frmchangedaddresses
         frmchangedaddresses:=tfrmChangedAddresses.Create(application);
 
-        if frmDBVMWatchConfig.LockPage then
+        if frmDBVMWatchConfigFindWhatCodeAccesses.LockPage then
           unlockaddress:=LockMemory(processid, address and QWORD($fffffffffffff000),4096)
         else
           unlockaddress:=0;
@@ -4803,9 +4963,6 @@ begin
         MessageDlg('dbvm_watch failed', mtError, [mbok],0);
 
     end;
-    freeandnil(frmDBVMWatchConfig);
-
-
   end;
   {$endif}
 end;
@@ -5440,6 +5597,8 @@ begin
   miDebugSetAddress.enabled:=false;
   stacktrace1.Enabled:=false;
   miDebugExecuteTillReturn.Enabled:=false;
+
+  ApplySourceCodeDebugUpdate;
   {Other tasks}
   //...
 end;
@@ -6114,6 +6273,8 @@ begin
 
 
   ApplyFollowRegister;
+  ApplySourceCodeDebugUpdate;
+
   {for i:=0 to 4095 do
   begin
     if pbyte(ptruint(laststack)+stacktracesize+i)^<>$ce then

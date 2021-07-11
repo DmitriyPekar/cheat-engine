@@ -1246,7 +1246,9 @@ end;
 
 procedure TMemoryRecord.setColor(c: TColor);
 begin
-  if c=graphics.clWindowText then  //in case clWindowText isn't good to use
+  if (c=graphics.clWindowText) or
+     (c=graphics.clDefault)
+  then  //in case clWindowText isn't good to use
     c:=clWindowtext;
 
   fColor:=c;
@@ -1372,6 +1374,10 @@ begin
   begin
     try
       fColor:=strtoint('$'+tempnode.textcontent);
+      if (fcolor=graphics.clWindowText) or
+         (fcolor=graphics.clDefault)
+      then
+        fcolor:=clWindowtext;
     except
     end;
   end;
@@ -1893,7 +1899,9 @@ begin
   end;
 
 
-  if fcolor<>clWindowText then
+  if (fcolor<>clWindowText) and
+     (fcolor<>graphics.clDefault)
+  then
     cheatEntry.AppendChild(doc.CreateElement('Color')).TextContent:=inttohex(fcolor,6);
 
   if fisGroupHeader then
@@ -3135,6 +3143,8 @@ var
   usesMath: boolean;
   lastBraceOpen: integer;
   f: single;
+
+  newundovalue: string;
 begin
   //check if it is a '(description)' notation
 
@@ -3249,7 +3259,8 @@ begin
   end;
 
   if (not isfreezer) then
-    undovalue:=GetValue;
+    newundovalue:=GetValue;
+
 
   realAddress:=GetRealAddress; //quick update
 
@@ -3492,6 +3503,9 @@ begin
   freememandnil(buf);
 
   frozenValue:=unparsedvalue;     //we got till the end, so update the frozen value
+
+  if (not isfreezer) and (GetValue<>newundovalue) then
+    undovalue:=newundovalue;
 
 end;
 

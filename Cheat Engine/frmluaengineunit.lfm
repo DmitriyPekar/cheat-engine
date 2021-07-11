@@ -872,8 +872,8 @@ object frmLuaEngine: TfrmLuaEngine
   end
   object pmEditor: TPopupMenu
     Images = leImageList
-    Left = 59
-    Top = 184
+    Left = 64
+    Top = 152
     object miCut: TMenuItem
       Caption = 'Cut'
       ImageIndex = 7

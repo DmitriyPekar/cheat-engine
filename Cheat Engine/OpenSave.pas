@@ -22,7 +22,7 @@ uses
      zstream, luafile, disassemblerComments, commonTypeDefs, lazutf8, betterControls;
 
 
-var CurrentTableVersion: dword=35;
+var CurrentTableVersion: dword=37;
     lastLoadedTableVersion: dword;
     iscetrainer: integer=0;
 
@@ -325,7 +325,7 @@ var
     imagepos: integer=0;
 
     cle: TCodeListEntry;
-    color: TColor;
+    EntryColor: TColor;
 
     hasLuaScript: boolean=false;
     usesScriptEntries: boolean=false;
@@ -469,12 +469,17 @@ begin
         if CodeEntry.NodeName='CodeEntry' then
         begin
           isCodeListGroupHeader:=false;
-          color:=clWindowText;
+          entrycolor:=clWindowText;
 
           if (CodeEntry.Attributes<>nil) then
           begin
             if (CodeEntry.Attributes.GetNamedItem('GroupHeader')<>nil) then isCodeListGroupHeader:=CodeEntry.Attributes.GetNamedItem('GroupHeader').TextContent='1';
-            if (CodeEntry.Attributes.GetNamedItem('Color')<>nil) then color:=strtoint('$'+CodeEntry.Attributes.GetNamedItem('Color').TextContent);
+            if (CodeEntry.Attributes.GetNamedItem('Color')<>nil) then entrycolor:=strtoint('$'+CodeEntry.Attributes.GetNamedItem('Color').TextContent);
+
+            if (entrycolor=graphics.clWindowText) or
+               (entrycolor=graphics.clDefault)
+            then //default color (wasn't supposed to be saved)
+              entrycolor:=clWindowtext;
           end;
 
 
@@ -567,7 +572,7 @@ begin
           with advancedoptions do
           begin
             cle:=TCodeListEntry.create;
-            cle.color:=color;
+            cle.color:=entrycolor;
 
             if isCodeListGroupHeader=false then
             begin
@@ -1239,7 +1244,9 @@ begin
     begin
       CodeRecord:=CodeRecords.AppendChild(doc.CreateElement('CodeEntry'));
 
-      if TCodeListEntry(advancedoptions.lvCodelist.Items[i].data).color<>clWindowtext then //don't save the color if it's the default color
+      if (TCodeListEntry(advancedoptions.lvCodelist.Items[i].data).color<>clWindowtext) and
+         (TCodeListEntry(advancedoptions.lvCodelist.Items[i].data).color<>graphics.clDefault)
+      then //don't save the color if it's the default color
       begin
         a:=doc.CreateAttribute('Color');
         a.TextContent:=inttohex(TCodeListEntry(advancedoptions.lvCodelist.Items[i].data).color,8);
